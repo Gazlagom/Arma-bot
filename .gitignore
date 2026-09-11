@@ -1,0 +1,20 @@
+# Environment
+.env
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Logs
+logs/
+*.log
+
+# Local server configuration and durable notification state
+servers.local.json
+data/
+.oyb-backups/
+.oyb-service-backup-*
+.oyb-validate-*/
