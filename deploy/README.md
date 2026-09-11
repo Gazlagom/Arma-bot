@@ -4,7 +4,7 @@ On a Debian/Ubuntu VPS with systemd and Python 3.11+, clone this branch and run:
 
 ```bash
 git clone https://github.com/Gazlagom/Arma-bot.git
-cd Arma-bot
+cd test-bot
 bash deploy/setup.sh
 ```
 

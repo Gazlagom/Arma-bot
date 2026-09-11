@@ -19,20 +19,27 @@ B = "22222222-2222-3333-4444-555555555555"
 class FakeVoice:
     def __init__(self, guild, id, name):
         self.guild, self.id, self.name = guild, id, name
-        self.members, self.category, self.edits = [], None, 0
+        self.members, self.category, self.edits, self.overwrites = [], None, 0, {}
 
     async def edit(self, **kwargs):
         self.edits += 1
         self.name = kwargs.get("name", self.name)
+        self.overwrites = kwargs.get("overwrites", self.overwrites)
         return self
+
+    async def delete(self, **kwargs):
+        self.guild.voice_channels.remove(self)
+        self.guild._by_id.pop(self.id, None)
 
 
 class FakeCategory:
     def __init__(self, guild, id, name, position=5):
         self.guild, self.id, self.name, self.position = guild, id, name, position
+        self.overwrites = {}
 
     async def edit(self, **kwargs):
         self.position = kwargs.get("position", self.position)
+        self.overwrites = kwargs.get("overwrites", self.overwrites)
         return self
 
     async def move(self, **kwargs):
@@ -64,6 +71,7 @@ class FakeGuild:
 
     async def create_category(self, name, **kwargs):
         c = FakeCategory(self, self._next(), name, position=kwargs.get("position", 5))
+        c.overwrites = kwargs.get("overwrites", {})
         self.categories.append(c)
         self._by_id[c.id] = c
         return c
@@ -72,6 +80,7 @@ class FakeGuild:
         self.creates += 1
         v = FakeVoice(self, self._next(), name)
         v.category = kwargs.get("category")
+        v.overwrites = kwargs.get("overwrites", {})
         self.voice_channels.append(v)
         self._by_id[v.id] = v
         return v
@@ -127,6 +136,42 @@ class ServerStatsTests(unittest.IsolatedAsyncioTestCase):
         # 3 servers + arma + vc (no admin role configured).
         self.assertEqual(set(self.stats.channels), {"server-1", "server-2", "server-3", "arma", "vc"})
         self.assertEqual(self.guild.creates, 5)
+
+    async def test_prepare_adopts_existing_tiles_and_removes_duplicates(self):
+        # First run creates the five tiles.
+        await self.stats.prepare(self.guild)
+        first = {k: v.id for k, v in self.stats.channels.items()}
+        self.assertEqual(self.guild.creates, 5)
+        # Simulate a wiped database (stored ids gone) plus a leftover duplicate tile.
+        dup = await self.guild.create_voice_channel("🔴 Classic · Offline", category=self.stats.category)
+        self.store.db.execute("DELETE FROM stat_channels")
+        self.store.db.commit()
+        self.guild.creates = 0
+        stats2 = ServerStats(self.bot)
+        await stats2.prepare(self.guild)
+        # Nothing new created — the existing tiles were reused by name.
+        self.assertEqual(self.guild.creates, 0)
+        self.assertEqual({k: v.id for k, v in stats2.channels.items()}, first)
+        # The stray duplicate was cleaned up; the five real tiles remain.
+        self.assertNotIn(dup, self.guild.voice_channels)
+        self.assertEqual(len([c for c in self.guild.voice_channels
+                              if c.category and c.category.id == stats2.category.id]), 5)
+
+    async def test_staging_hides_then_reveals_category_and_tiles(self):
+        everyone = self.guild.default_role
+        with patch.dict("os.environ", {"OYB_STAGING": "1"}):
+            stats = ServerStats(self.bot)
+            await stats.prepare(self.guild)
+        # Staging on: category and every tile are hidden from @everyone.
+        self.assertFalse(stats.category.overwrites[everyone].view_channel)
+        for tile in stats.channels.values():
+            self.assertFalse(tile.overwrites[everyone].view_channel)
+        # Staging off: re-preparing adopts the same channels and reveals them.
+        stats2 = ServerStats(self.bot)
+        await stats2.prepare(self.guild)
+        self.assertTrue(stats2.category.overwrites[everyone].view_channel)
+        for tile in stats2.channels.values():
+            self.assertTrue(tile.overwrites[everyone].view_channel)
 
     async def test_per_server_states_live_idle_offline_and_coming_soon(self):
         counts = self.stats._in_game()
