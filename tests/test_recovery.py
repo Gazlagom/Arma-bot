@@ -40,6 +40,35 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         elapsed = monitor.on_session_start.await_args.args[0]
         self.assertAlmostEqual(elapsed, seconds, delta=3)
 
+    async def test_online_when_log_is_written_without_a_matching_heartbeat(self):
+        # Some builds format the FPS line differently; a fresh log still means up.
+        self.write("12:00:00.000 SCRIPT : a line the parser ignores\n", age=0)
+        monitor = self.monitor()
+        await monitor._tick()
+        self.assertTrue(monitor.online)
+
+    async def test_offline_when_log_stops_being_written(self):
+        self.write(heartbeat("12:00:00"), age=10000)
+        monitor = self.monitor()
+        await monitor._tick()
+        self.assertFalse(monitor.online)
+
+    async def test_match_recovers_on_fresh_log_without_a_heartbeat(self):
+        # A build with an unrecognized heartbeat line: an open match on a log
+        # that is still being written should still be picked up as live.
+        self.write(game("10:00:00"), age=0)
+        monitor = self.monitor()
+        await monitor._tick()
+        monitor.on_session_start.assert_awaited_once()
+        self.assertTrue(monitor.online)
+
+    async def test_open_match_on_a_stale_log_is_not_started(self):
+        # Same open match but the log stopped being written: server is down.
+        self.write(game("10:00:00"), age=10000)
+        monitor = self.monitor()
+        await monitor._tick()
+        monitor.on_session_start.assert_not_awaited()
+
     async def test_fresh_bot_recovers_same_match_age_twice(self):
         self.write(game("10:00:00") + heartbeat("12:14:00"))
         first = self.monitor()

@@ -121,6 +121,7 @@ class ReforgerMonitor:
     _clock_day: float = field(default=0.0, init=False)
     _last_clock: Optional[float] = field(default=None, init=False)
     _log_clock: float = field(default=0.0, init=False)
+    _log_mtime: float = field(default=0.0, init=False)
 
     def _advance_clock(self, line: str) -> float:
         """Unwrap time-of-day stamps using every log line, including midnight."""
@@ -136,14 +137,14 @@ class ReforgerMonitor:
 
     @property
     def online(self) -> bool:
-        """True when the server has emitted a heartbeat within the stale window.
-
-        Distinguishes a server that is up but between matches (idle) from one
-        whose process is down / not shipping logs (offline).
+        """True when the server is up: a recent FPS heartbeat, or failing that a
+        log file that is still being written (covers builds that log the
+        heartbeat line differently). A down server stops writing, so its log
+        goes stale and this reads offline.
         """
-        if self._last_heartbeat == 0.0:
-            return False
-        return (time.monotonic() - self._last_heartbeat) < self.stale_seconds
+        if self._last_heartbeat and (time.monotonic() - self._last_heartbeat) < self.stale_seconds:
+            return True
+        return bool(self._log_mtime) and (time.time() - self._log_mtime) < self.stale_seconds
 
     async def run(self) -> None:
         """Main loop. Runs until cancelled."""
@@ -168,6 +169,11 @@ class ReforgerMonitor:
             # Re-read history if the same path returns after a wipe or a gap.
             self._current_path = None
             return
+
+        try:
+            self._log_mtime = os.path.getmtime(path)
+        except OSError:
+            self._log_mtime = 0.0
 
         if path != self._current_path:
             await self._on_rotation(path)
@@ -246,9 +252,10 @@ class ReforgerMonitor:
             if heartbeat is not None:
                 self._last_heartbeat = now - age(heartbeat)
             if live_start is not None:
-                stale = heartbeat is None or age(heartbeat) >= self.stale_seconds
-                if not stale or await self._server_alive_via_a2s():
-                    if stale:
+                fresh_log = bool(self._log_mtime) and (time.time() - self._log_mtime) < self.stale_seconds
+                fresh_beat = heartbeat is not None and age(heartbeat) < self.stale_seconds
+                if fresh_beat or fresh_log or await self._server_alive_via_a2s():
+                    if not fresh_beat:
                         self._last_heartbeat = now
                     await self._start(age(live_start), f"{path}:{live_start:.3f}")
             logger.info("Initial scan complete for %s (live=%s)", path, self._live)
@@ -264,6 +271,11 @@ class ReforgerMonitor:
             elif event is LineEvent.GAME_END and self._live:
                 await self._end()
 
+        if chunk and not events:
+            # Fresh log lines the parser doesn't recognize still mean the server
+            # is writing; keep the session's liveness current.
+            self._last_heartbeat = now
+
     @staticmethod
     def _read_from(path: str, pos: int) -> tuple[str, int, float]:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
@@ -274,17 +286,14 @@ class ReforgerMonitor:
     async def _check_staleness(self) -> None:
         if not self._live:
             return
-        if self._last_heartbeat == 0.0:
+        fresh_log = bool(self._log_mtime) and (time.time() - self._log_mtime) < self.stale_seconds
+        fresh_beat = bool(self._last_heartbeat) and (time.monotonic() - self._last_heartbeat) < self.stale_seconds
+        if fresh_log or fresh_beat:
             return
-        elapsed = time.monotonic() - self._last_heartbeat
-        if elapsed < self.stale_seconds:
-            return
+        if not self._log_mtime and self._last_heartbeat == 0.0:
+            return  # no liveness signal yet; nothing to judge by
 
-        logger.warning(
-            "No server heartbeat for %.0fs (threshold %ds)",
-            elapsed,
-            self.stale_seconds,
-        )
+        logger.warning("Server log went stale (threshold %ds)", self.stale_seconds)
         if await self._server_alive_via_a2s():
             # Logs stalled (shipping hiccup) but server is up: avoid flapping.
             logger.info("A2S reports server up; keeping session alive")
