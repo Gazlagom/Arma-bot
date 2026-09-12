@@ -31,6 +31,10 @@ class AccountLinks:
             CREATE TABLE IF NOT EXISTS link_review (
             guild INTEGER PRIMARY KEY, channel INTEGER, control INTEGER, reviewer_role INTEGER);
         ''')
+        # Older databases predate the stored Discord display name.
+        if "discord_name" not in {r[1] for r in self.db.execute("PRAGMA table_info(link_requests)")}:
+            self.db.execute("ALTER TABLE link_requests ADD COLUMN discord_name TEXT")
+        self.db.commit()
 
     def lookup(self, guild, discord_id):
         row = self.db.execute("SELECT identity FROM account_links WHERE guild=? AND discord_id=?",
@@ -58,7 +62,7 @@ class AccountLinks:
         except sqlite3.IntegrityError as exc:
             raise LinkConflict("This game account is already linked to another Discord account.") from exc
 
-    def submit(self, guild, discord_id, identity, name):
+    def submit(self, guild, discord_id, identity, name, discord_name=""):
         identity = str(uuid.UUID(identity))
         token = uuid.uuid4().hex
         with self.db:
@@ -68,12 +72,14 @@ class AccountLinks:
             if self.db.execute("SELECT 1 FROM account_links WHERE guild=? AND identity=?", (guild, identity)).fetchone():
                 raise LinkConflict("That game account is already linked. Contact an admin.")
             self.db.execute("UPDATE link_requests SET status='replaced' WHERE guild=? AND discord_id=? AND status='pending'", (guild, discord_id))
-            self.db.execute("INSERT INTO link_requests VALUES (?,?,?,?,?,'pending',?,NULL)",
-                            (token, guild, discord_id, identity, name, time.time()))
+            self.db.execute("INSERT INTO link_requests"
+                            "(token,guild,discord_id,identity,name,status,created,reviewer,discord_name)"
+                            " VALUES (?,?,?,?,?,'pending',?,NULL,?)",
+                            (token, guild, discord_id, identity, name, time.time(), discord_name))
         return token
 
     def pending(self, guild):
-        return self.db.execute("SELECT token,discord_id,identity,name FROM link_requests WHERE guild=? AND status='pending' ORDER BY created LIMIT 25", (guild,)).fetchall()
+        return self.db.execute("SELECT token,discord_id,identity,name,discord_name FROM link_requests WHERE guild=? AND status='pending' ORDER BY created LIMIT 25", (guild,)).fetchall()
 
     def review(self, guild, token, reviewer, approve):
         with self.db:
@@ -85,6 +91,22 @@ class AccountLinks:
                 self._insert_link(guild, row[0], row[1], f"admin:{reviewer}")
             self.db.execute("UPDATE link_requests SET status=?,reviewer=? WHERE token=?",
                             ("approved" if approve else "rejected", reviewer, token))
+
+    def unlink(self, guild, discord_id):
+        """Remove an approved link so an abused account stops earning XP.
+
+        The game identity's tracked playtime and XP are untouched, so a genuine
+        owner can re-link later and keep their history. Returns the removed
+        identity, or None if that Discord account had no link.
+        """
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            row = self.db.execute("SELECT identity FROM account_links WHERE guild=? AND discord_id=?",
+                                  (guild, discord_id)).fetchone()
+            if not row:
+                return None
+            self.db.execute("DELETE FROM account_links WHERE guild=? AND discord_id=?", (guild, discord_id))
+        return row[0]
 
     def status(self, guild, discord_id):
         identity = self.lookup(guild, discord_id)
@@ -99,7 +121,7 @@ class AccountLinks:
     def request(self, guild, token):
         """One pending/handled request by token, for the staff review alert."""
         return self.db.execute(
-            "SELECT discord_id,identity,name,status FROM link_requests WHERE guild=? AND token=?",
+            "SELECT discord_id,identity,name,status,discord_name FROM link_requests WHERE guild=? AND token=?",
             (guild, token)).fetchone()
 
     def review_settings(self, guild):

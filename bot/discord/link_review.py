@@ -3,6 +3,7 @@
 Views are persistent (fixed custom_ids plus the request token in the alert
 footer), so they keep working across restarts.
 """
+from datetime import timedelta
 import logging
 
 import discord
@@ -14,6 +15,7 @@ LOG = logging.getLogger("reforger.link_review")
 REVIEW_MARKER = "OYB • Link request review (staff only)"
 CONTROL_MARKER = "OYB • Link request alerts control"
 TOKEN_PREFIX = "OYB • Link request • "
+HANDLED_MARKER = TOKEN_PREFIX + "handled"
 REVIEWER_ROLE_NAME = "OYB Link Reviewer"
 STAFF_PERMS = ("administrator", "manage_guild", "manage_channels", "manage_messages", "moderate_members")
 
@@ -183,10 +185,11 @@ async def post_request_alert(bot, guild, token):
     request = links.request(guild.id, token)
     if not request:
         return
-    discord_id, identity, name, _status = request
+    discord_id, identity, name, _status, discord_name = request
     role = guild.get_role(cfg["reviewer_role"]) if cfg["reviewer_role"] else None
+    who = discord.utils.escape_markdown(discord_name) + " " if discord_name else ""
     embed = discord.Embed(title="🔗 New link request", colour=0xF1C40F, description=(
-        f"**Member:** <@{discord_id}> (`{discord_id}`)\n"
+        f"**Member:** {who}<@{discord_id}> (`{discord_id}`)\n"
         f"**Reforger name:** {discord.utils.escape_markdown(name)}\n"
         f"**Game identity:** `{identity}`\n\n"
         "Confirm ownership in-game before approving — a matching name alone is not proof."))
@@ -195,3 +198,27 @@ async def post_request_alert(bot, guild, token):
         content=role.mention if role else None, embed=embed, view=ReviewButtons(bot),
         allowed_mentions=discord.AllowedMentions(everyone=False, users=False,
                                                  roles=[role] if role else False, replied_user=False))
+
+
+async def prune_handled(bot, guild, older_than=86400):
+    """Delete approved/rejected request alerts older than a day so the staff
+    channel doesn't clog. Pending requests and the control message are kept."""
+    cfg = bot.account_links.review_settings(guild.id)
+    channel = guild.get_channel(cfg["channel"]) if cfg["channel"] else None
+    if not isinstance(channel, discord.TextChannel):
+        return 0
+    cutoff = discord.utils.utcnow() - timedelta(seconds=older_than)
+    removed = 0
+    try:
+        async for message in channel.history(limit=200, before=cutoff):
+            if message.author.id != bot.user.id or message.id == cfg["control"]:
+                continue
+            if any(e.footer and e.footer.text == HANDLED_MARKER for e in message.embeds):
+                try:
+                    await message.delete()
+                    removed += 1
+                except discord.HTTPException:
+                    pass
+    except discord.HTTPException:
+        LOG.warning("Could not sweep the link-request channel; will retry")
+    return removed
