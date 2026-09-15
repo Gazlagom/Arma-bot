@@ -39,7 +39,7 @@ On the Debian/Ubuntu VPS (systemd, Python 3.11+):
 
 ```bash
 git clone https://github.com/Gazlagom/Arma-bot.git
-cd test-bot
+cd Arma-bot
 bash deploy/setup.sh
 ```
 

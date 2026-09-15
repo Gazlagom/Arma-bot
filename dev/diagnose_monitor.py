@@ -5,7 +5,7 @@ Reads your servers exactly like the bot does and prints, per server, whether it
 sees a live match and WHY — so we can root-cause 'stuck on Waiting' without
 guessing. Run on the bot host:
 
-    cd /root/test-bot && python3 dev/diagnose_monitor.py
+    cd /root/Arma-bot && python3 dev/diagnose_monitor.py
 
 Optionally pass log dirs directly: python3 dev/diagnose_monitor.py /path/to/logs
 """

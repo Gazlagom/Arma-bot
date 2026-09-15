@@ -92,7 +92,7 @@ References: [Discord pin permission](https://docs.discord.com/developers/resourc
 ## Update and verify on the VPS
 
 ```bash
-cd /root/test-bot &&
+cd /root/Arma-bot &&
 git pull --ff-only origin main &&
 .venv/bin/pip install -r requirements.txt &&
 sudo systemctl restart reforger-timer
