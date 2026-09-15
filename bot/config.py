@@ -22,6 +22,39 @@ def staging_enabled() -> bool:
     return os.getenv("OYB_STAGING", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# The OYB server's own channels, so a deploy needs no extra setup. Another
+# guild overrides them with the matching environment variable; a channel this
+# bot cannot see is logged and skipped rather than treated as fatal.
+MATCH_LEADERBOARD_CHANNEL = 1549082383729565696
+FACTION_CHANNEL = 1549082869832359956
+
+
+def _channel_id(name: str, default: int | None) -> int | None:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def leaderboard_channel_id() -> int | None:
+    """Pin the public leaderboard to this channel id. Unset, the bot finds or
+    creates a #leaderboard itself, which other guilds rely on."""
+    return _channel_id("LEADERBOARD_CHANNEL_ID", None)
+
+
+def faction_channel_id() -> int | None:
+    """Where the faction picker lives."""
+    return _channel_id("FACTION_CHANNEL_ID", FACTION_CHANNEL)
+
+
+def game_leaderboard_channel_id() -> int | None:
+    """Where each finished match posts its own results board."""
+    return _channel_id("GAME_LEADERBOARD_CHANNEL_ID", MATCH_LEADERBOARD_CHANNEL)
+
+
 def command_auto_clear_seconds() -> int:
     """Seconds before a /rank or /stats card auto-deletes (0 = keep). Default 5 min."""
     raw = os.getenv("COMMAND_AUTO_CLEAR_SECONDS", "300").strip()

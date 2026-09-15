@@ -6,8 +6,9 @@ import math
 import time
 
 import discord
-from bot.config import staging_enabled
+from bot.config import staging_enabled, leaderboard_channel_id
 from bot.discord.leaderboard_command import PAGE_SIZE, leaderboard_embed, standings
+from bot.storage.combat_store import week_start
 
 LOG = logging.getLogger('reforger.leaderboard')
 CHANNEL_NAME = 'leaderboard'
@@ -141,7 +142,41 @@ class LeaderboardDisplay:
             result.append((name or (member.display_name if member else f'Member {member_id}'), kills, deaths))
         return result
 
+    async def _lock(self, channel, guild, set_topic=False):
+        """Best-effort keep the channel display-only. Never block posting the
+        board if we lack Manage Channels/Roles here — the board matters more."""
+        desired = overwrites(guild, channel.overwrites)
+        change_topic = set_topic and channel.topic != MARKER
+        if desired == channel.overwrites and not change_topic:
+            return channel
+        kwargs = dict(overwrites=desired, reason='Keep OYB leaderboard display-only')
+        if change_topic:
+            kwargs['topic'] = MARKER
+        try:
+            return await channel.edit(**kwargs)
+        except discord.HTTPException:
+            LOG.warning("Could not lock the leaderboard channel (needs Manage Channels/Roles); posting anyway")
+            return channel
+
     async def channel(self, guild, state):
+        # An admin can pin the board to one channel by id; then we never create
+        # or search, which sidesteps Discord's channel-create rate limit.
+        pinned = leaderboard_channel_id()
+        if pinned:
+            channel = guild.get_channel(pinned)
+            if not isinstance(channel, discord.TextChannel):
+                try:
+                    fetched = await guild.fetch_channel(pinned)
+                except discord.HTTPException:
+                    fetched = None
+                channel = fetched if isinstance(fetched, discord.TextChannel) else None
+            if channel is None:
+                raise RuntimeError(f"LEADERBOARD_CHANNEL_ID {pinned} is not a text channel I can see")
+            channel = await self._lock(channel, guild, set_topic=True)
+            if state['channel'] != channel.id:
+                state.update(channel=channel.id, message=None)
+                self.bot.store.save_leaderboard(state)
+            return channel
         # Steady state: the saved channel is in the gateway cache, so resolve it
         # without a REST channel-list call every refresh.
         channel = None
@@ -164,9 +199,7 @@ class LeaderboardDisplay:
                 overwrites=overwrites(guild), reason='OYB permanent leaderboard')
             LOG.info('Leaderboard channel created: %s', channel.id)
         else:
-            desired = overwrites(guild, channel.overwrites)
-            if desired != channel.overwrites:
-                channel = await channel.edit(overwrites=desired, reason='Keep OYB leaderboard display-only')
+            channel = await self._lock(channel, guild)
         if state['channel'] != channel.id:
             state.update(channel=channel.id, message=None)
             self.bot.store.save_leaderboard(state)
@@ -194,7 +227,7 @@ class LeaderboardDisplay:
         page = max(0, min(state['page'], max(0, (len(rows) - 1) // PAGE_SIZE)))
         state['page'] = page
         self.view.configure(page, len(rows))
-        embed = leaderboard_embed(rows, page)
+        embed = leaderboard_embed(rows, page, week_start())
         embed.set_footer(text=MARKER + '\n' + embed.footer.text)
         desired = signature(embed, self.view.to_components())
         if message is None:

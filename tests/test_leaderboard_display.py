@@ -8,7 +8,16 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 import discord
-from bot.discord.leaderboard_command import leaderboard_embed
+from bot.discord.leaderboard_command import leaderboard_embed as _embed
+from bot.storage.combat_store import stamp, week_start
+
+
+def leaderboard_embed(rows, page):
+    # Match how the display builds it, marker footer included, so fixture
+    # messages compare equal and are recognised as boards this bot owns.
+    embed = _embed(rows, page, week_start())
+    embed.set_footer(text=MARKER + '\n' + embed.footer.text)
+    return embed
 from bot.discord.leaderboard_display import (LeaderboardDisplay, CHANNEL_NAME, MARKER, overwrites,
                                  retry_delay, signature)
 from bot.storage.notification_store import NotificationStore
@@ -161,6 +170,32 @@ class DisplayTests(unittest.IsolatedAsyncioTestCase):
         self.channels.stop()
         self.store.close()
         self.tmp.cleanup()
+
+    async def test_pinned_channel_id_is_used_and_never_created(self):
+        pinned = Channel(self.guild, 555, name='leaderboard', topic=None)
+        self.guild.channels.append(pinned)
+        state = self.store.leaderboard(1)
+        with patch('bot.discord.leaderboard_display.leaderboard_channel_id', return_value=555):
+            channel = await self.display.channel(self.guild, state)
+        self.assertIs(channel, pinned)
+        self.assertEqual(self.guild.creates, 0)  # never creates when pinned
+        self.assertEqual(self.store.leaderboard(1)['channel'], 555)  # saved
+
+    async def test_lock_failure_does_not_block_the_board(self):
+        channel = Channel(self.guild, 777, name='leaderboard', topic=MARKER)
+        async def forbidden(**kwargs):
+            raise discord.Forbidden(SimpleNamespace(status=403, reason='Forbidden'), 'no perms')
+        channel.edit = forbidden
+        result = await self.display._lock(channel, self.guild)  # must not raise
+        self.assertIs(result, channel)
+
+    async def test_pinned_channel_missing_raises_instead_of_creating(self):
+        state = self.store.leaderboard(1)
+        self.guild.fetch_channel = AsyncMock(side_effect=missing())
+        with patch('bot.discord.leaderboard_display.leaderboard_channel_id', return_value=999):
+            with self.assertRaises(RuntimeError):
+                await self.display.channel(self.guild, state)
+        self.assertEqual(self.guild.creates, 0)
 
     async def initial(self):
         await self.display.tick()
@@ -332,15 +367,23 @@ class DisplayTests(unittest.IsolatedAsyncioTestCase):
             identity='11111111-2222-3333-4444-555555555555'
             token=links.submit(1,10,identity,'Test Player')
             links.review(1,token,99,True)
+            other='99999999-9999-9999-9999-999999999999'
+            when=stamp(week_start())
+            sql=("INSERT INTO combat_events (server,event_key,occurred,victim,killer,relation)"
+                 " VALUES ('s',?,?,?,?,'ENEMY')")
+            def scored(tag, victim, killer):
+                links.db.execute(sql,(tag,when,victim,killer))
             with links.db:
                 links.db.execute('CREATE TABLE rank_wallet_v2 (credit, milliseconds)')
                 links.db.execute('INSERT INTO rank_wallet_v2 VALUES (123,456)')
-                links.db.execute('INSERT INTO combat_totals VALUES (?,1,2,0,?)',(identity,'now'))
+                scored('k0',other,identity)                      # one kill
+                scored('d0',identity,other); scored('d1',identity,other)  # two deaths
             self.bot.account_links=links
             self.display.rows=LeaderboardDisplay.rows.__get__(self.display)
             message=await self.initial()
             with links.db:
-                links.db.execute('UPDATE combat_totals SET player_kills=7 WHERE identity=?',(identity,))
+                for n in range(1,7):  # six more kills this week: 1 -> 7
+                    scored(f'k{n}',other,identity)
             self.now+=15
             await self.display.tick()
             self.now+=30
@@ -349,7 +392,6 @@ class DisplayTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('Test Player',message.embeds[0].description)
             self.assertRegex(message.embeds[0].description,r'Test Player\s+7\s+2')
             self.assertEqual(links.db.execute('SELECT * FROM rank_wallet_v2').fetchone(),(123,456))
-            self.assertEqual(links.db.execute('SELECT player_kills,deaths FROM combat_totals').fetchone(),(7,2))
         finally:
             links.close()
 

@@ -24,6 +24,7 @@ from bot.storage.combat_store import migrate as migrate_combat
 from bot.tracking.combat_ingestor import CombatIngestor
 from bot.discord.stats_command import StatsCommand
 from bot.discord.leaderboard_display import LeaderboardDisplay
+from bot.discord.match_results import MatchResults
 from bot.ranks.message_xp import award_message
 from bot.storage.maintenance import Maintenance
 from bot.discord.server_stats import ServerStats
@@ -119,6 +120,7 @@ class NotificationBot(TimerBot):
         migrate_combat(self.account_links.db)
         self.stats_command = StatsCommand(self)
         self.leaderboard_display = LeaderboardDisplay(self)
+        self.match_results = MatchResults(self)
         self.combat_ingestor = CombatIngestor(self)
         self.server_stats = ServerStats(self)
         self.maintenance = Maintenance(self)
@@ -128,8 +130,10 @@ class NotificationBot(TimerBot):
     async def setup_hook(self):
         self.leaderboard_display.register()
         from bot.discord.link_review import AlertsControlView, ReviewButtons
+        from bot.discord.factions import FactionView
         self.add_view(AlertsControlView(self))
         self.add_view(ReviewButtons(self))
+        self.add_view(FactionView(self))
         self._jobs.append(asyncio.create_task(self.rank_command.register()))
 
     async def on_message(self, message):
@@ -154,6 +158,23 @@ class NotificationBot(TimerBot):
                 except Exception:
                     logger.exception("Announcements channel unavailable; alerts fall back to #servers")
                 await prepare_join_channel(self, guild, readonly_overwrites(guild, hidden=staging_enabled()))
+                try:
+                    from bot.config import faction_channel_id
+                    from bot.discord.factions import prepare_faction_picker
+                    pinned = faction_channel_id()
+                    if pinned:
+                        target = guild.get_channel(pinned)
+                        if not isinstance(target, discord.TextChannel):
+                            logger.warning("FACTION_CHANNEL_ID %s is not a text channel I can see", pinned)
+                            target = None
+                    else:
+                        row = self.account_links.db.execute(
+                            "SELECT channel FROM join_channel WHERE guild=?", (guild.id,)).fetchone()
+                        target = guild.get_channel(row[0]) if row else None
+                    if isinstance(target, discord.TextChannel):
+                        await prepare_faction_picker(self, guild, target)
+                except Exception:
+                    logger.exception("Faction picker unavailable; check Manage Roles")
                 try:
                     from bot.discord.link_review import prepare_review_channel
                     await prepare_review_channel(self, guild)
@@ -197,7 +218,13 @@ class NotificationBot(TimerBot):
                     )
 
                 async def ended(server=server):
-                    self.match_times.pop(server.id, None)
+                    played = self.match_times.pop(server.id, None)
+                    if played is not None:
+                        # Post that match's own board once the ingestor has the
+                        # closing kills; the window is the match's own span.
+                        self.match_results.schedule(
+                            server.id, server.name,
+                            datetime.fromtimestamp(played[0]), datetime.now())
                     self._dirty_cards.add(server.id)
                     await self.refresh_servers()
                     await self.server_stats.tick()  # push the state change immediately
@@ -416,6 +443,7 @@ class NotificationBot(TimerBot):
             self.store.finish(row)
 
     async def close(self):
+        await self.match_results.close()
         for task in self._jobs:
             task.cancel()
         if self._jobs:
