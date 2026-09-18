@@ -2,12 +2,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import discord
 from bot.storage.account_links import AccountLinks
 import bot.discord.link_review as link_review
-from bot.discord.link_review import (AlertsControlView, ReviewButtons, TOKEN_PREFIX,
+from bot.discord.link_review import (AdminPanelView, ReviewButtons, TOKEN_PREFIX,
                                      HANDLED_MARKER, CONTROL_MARKER, post_request_alert, prune_handled)
 
 IDENT = "11111111-2222-3333-4444-555555555555"
@@ -173,13 +173,55 @@ class AlertTests(unittest.IsolatedAsyncioTestCase):
         second.response.send_message.assert_awaited()  # "already handled" message
         second.message.edit.assert_awaited()  # buttons removed
 
+    async def test_unapprovable_request_is_auto_rejected_and_the_member_told(self):
+        # The game account belongs to somebody else, so this request can never
+        # be approved. It closes itself rather than sitting in the queue.
+        self.links.verified_link(1, 77, IDENT, "admin:1")
+        member = SimpleNamespace(id=10, send=AsyncMock())
+        guild = SimpleNamespace(id=1, get_member=lambda i: member, get_channel=lambda i: None)
+        i = interaction(embeds=[alert_embed(self.token)], guild=guild)
+        await ReviewButtons(self.bot)._decide(i, True)
+        self.assertEqual(self.links.request(1, self.token)[3], "rejected")
+        member.send.assert_awaited_once()
+        self.assertIn("already linked to another Discord account", member.send.await_args.args[0])
+        edited = i.message.edit.await_args.kwargs["embed"]
+        self.assertEqual(edited.footer.text, HANDLED_MARKER)
+        self.assertEqual(edited.fields[-1].name, "\U0001F6AB Auto-rejected")
+
+    async def test_closed_dms_fall_back_to_the_join_channel(self):
+        self.links.verified_link(1, 77, IDENT, "admin:1")
+        member = SimpleNamespace(id=10, send=AsyncMock(side_effect=discord.HTTPException(Mock(), "closed")))
+        channel = FakeChannel()
+        with self.links.db:
+            self.links.db.execute("CREATE TABLE IF NOT EXISTS join_channel (guild INTEGER PRIMARY KEY, channel INTEGER, message INTEGER)")
+            self.links.db.execute("INSERT OR REPLACE INTO join_channel VALUES (1, 77, NULL)")
+        guild = SimpleNamespace(id=1, get_member=lambda i: member, get_channel=lambda i: channel)
+        i = interaction(embeds=[alert_embed(self.token)], guild=guild)
+        await ReviewButtons(self.bot)._decide(i, True)
+        self.assertIn("<@10>", channel.sent[0]["content"])
+
+    async def test_admin_panel_carries_every_control_and_refuses_members(self):
+        view = link_review.AdminPanelView(self.bot)
+        self.assertTrue(view.is_persistent())
+        ids = {child.custom_id for child in view.children}
+        self.assertEqual(ids, {"oyb:admin:pending", "oyb:admin:forcelink",
+                               "oyb:admin:unlink", "oyb:linkalerts:toggle"})
+        denied = interaction(admin=False)
+        await view.pending.callback(denied)
+        denied.response.send_message.assert_awaited()
+
+    async def test_panel_embed_reports_the_queue(self):
+        self.assertIn("**1** waiting", link_review.admin_panel_embed(self.links, 1).description)
+        self.links.review(1, self.token, 99, False)
+        self.assertIn("nothing waiting", link_review.admin_panel_embed(self.links, 1).description)
+
     async def test_toggle_adds_then_removes_reviewer_role(self):
         member = SimpleNamespace(id=99, roles=[], add_roles=AsyncMock(), remove_roles=AsyncMock())
         guild = SimpleNamespace(get_role=lambda i: self.role)
         i = SimpleNamespace(guild_id=1, guild=guild, user=member,
                             permissions=discord.Permissions(manage_guild=True),
                             response=SimpleNamespace(send_message=AsyncMock()))
-        view = AlertsControlView(self.bot)
+        view = AdminPanelView(self.bot)
         await view.toggle.callback(i)
         member.add_roles.assert_awaited_once()
         member.roles = [self.role]  # now subscribed

@@ -3,6 +3,7 @@ import logging
 import os
 from pathlib import Path
 import sqlite3
+import uuid
 from contextlib import closing
 import discord
 from bot.storage.account_links import LinkConflict
@@ -25,8 +26,45 @@ def find_identity(path, name):
     if not matches:
         raise ValueError("Name not found. Join an OYB game server, then enter your exact in-game name.")
     if len(matches) != 1:
-        raise ValueError("More than one player has that name. Ask an admin to help identify your account before linking.")
+        raise ValueError("More than one player has that name. Enter your identity ID instead — "
+                         "it is on your Reforger profile page.")
     return matches.pop()
+
+
+def find_by_identity(path, text):
+    """Accept a pasted identity ID, but only one the tracker has actually seen.
+
+    A typo would otherwise create a request against an account that has never
+    played here, which no admin could sensibly judge.
+    """
+    identity = str(uuid.UUID(text.strip()))
+    if not Path(path).is_file():
+        raise ValueError("Join an OYB game server first so the tracker can see you, then try again.")
+    with closing(sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)) as db:
+        seen = db.execute("SELECT 1 FROM totals WHERE identity=? LIMIT 1", (identity,)).fetchone()
+    if not seen:
+        raise ValueError("That identity ID has never played on an OYB server. Check it and try again.")
+    return identity
+
+
+def resolve_identity(path, text):
+    """Take whichever the member typed: an identity ID, or their in-game name."""
+    try:
+        uuid.UUID(text.strip())
+    except (ValueError, AttributeError):
+        return find_identity(path, text)
+    return find_by_identity(path, text)
+
+
+def known_name(path, identity):
+    """The most-played name the tracker has for an identity, so a request made
+    by identity ID still shows an admin who they are looking at."""
+    if not Path(path).is_file():
+        return None
+    with closing(sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)) as db:
+        row = db.execute("SELECT name FROM totals WHERE identity=? GROUP BY name "
+                         "ORDER BY SUM(seconds) DESC LIMIT 1", (identity,)).fetchone()
+    return row[0] if row else None
 
 
 def find_candidates(path, name):
@@ -49,7 +87,10 @@ def play_summary(candidate):
 
 
 class LinkModal(discord.ui.Modal, title="Link your Reforger account"):
-    name_input = discord.ui.TextInput(label="Your exact Reforger in-game name", min_length=1, max_length=100)
+    name_input = discord.ui.TextInput(
+        label="In-game name, or your identity ID",
+        placeholder="GazLagom    —or—    362be24b-cb0b-4539-bcf2-efb896c767db",
+        min_length=1, max_length=100)
 
     def __init__(self, bot):
         super().__init__()
@@ -61,8 +102,9 @@ class LinkModal(discord.ui.Modal, title="Link your Reforger account"):
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            name = str(self.name_input).strip()
-            identity = find_identity(os.getenv("PLAYTIME_DB", "data/playtime.sqlite3"), name)
+            typed = str(self.name_input).strip()
+            identity = resolve_identity(os.getenv("PLAYTIME_DB", "data/playtime.sqlite3"), typed)
+            name = known_name(os.getenv("PLAYTIME_DB", "data/playtime.sqlite3"), identity) or typed
             token = self.bot.account_links.submit(interaction.guild_id, interaction.user.id, identity, name,
                                                   interaction.user.display_name)
             try:
@@ -120,7 +162,7 @@ class ReviewList(discord.ui.View):
             who = discord.utils.escape_markdown(discord_name) + " " if discord_name else ""
             text = (f"Discord account: {who}<@{member}> (`{member}`)\n"
                     f"Reforger name: {discord.utils.escape_markdown(name)}\n"
-                    f"Game identity: `{identity}`\n\n"
+                    + "".join(f"Game identity: `{i}`\n" for i in held) + "\n"
                     "Confirm ownership with the player in-game before approving. A matching name alone is not verification.")
             await interaction.response.edit_message(content=text, view=ReviewDecision(bot, token, owner),
                                                     allowed_mentions=discord.AllowedMentions.none())
@@ -161,14 +203,14 @@ class UnlinkView(discord.ui.View):
                 await interaction.response.send_message("Admin access required.", ephemeral=True)
                 return
             target = select.values[0]
-            identity = bot.account_links.lookup(interaction.guild_id, target.id)
-            if not identity:
+            held = bot.account_links.identities(interaction.guild_id, target.id)
+            if not held:
                 await interaction.response.edit_message(
                     content=f"{target.mention} has no linked Reforger account.", view=None,
                     allowed_mentions=discord.AllowedMentions.none())
                 return
             text = (f"Remove the link for {target.mention} (`{target.id}`)?\n"
-                    f"Game identity: `{identity}`\n\n"
+                    + "".join(f"Game identity: `{i}`\n" for i in held) + "\n"
                     "Their tracked playtime and XP stay with the game account, so a genuine "
                     "owner can re-link later. Rank roles are removed now.")
             await interaction.response.edit_message(content=text,
@@ -281,34 +323,12 @@ class JoinView(discord.ui.View):
     @discord.ui.button(label="My link status", custom_id="oyb:link-status")
     async def status(self, interaction, button):
         text = self.bot.account_links.status(interaction.guild_id, interaction.user.id)
-        if self.bot.account_links.lookup(interaction.guild_id, interaction.user.id):
+        if self.bot.account_links.identities(interaction.guild_id, interaction.user.id):
             text += "\n" + self.bot.rank_sync.status(interaction.user.id)
         await interaction.response.send_message(text, ephemeral=True)
 
-    @discord.ui.button(label="Admin: review requests", custom_id="oyb:link-review")
-    async def review(self, interaction, button):
-        if not can_review(interaction, self.bot.config.guild_id):
-            await interaction.response.send_message("Only admins with Manage Server can review requests.", ephemeral=True)
-            return
-        rows = self.bot.account_links.pending(interaction.guild_id)
-        await interaction.response.send_message("Pending requests (up to 25; reopen after reviewing for more)." if rows else "No pending requests.",
-                                                view=ReviewList(self.bot, rows, interaction.user.id) if rows else None,
-                                                ephemeral=True)
-
-    @discord.ui.button(label="Admin: remove a link", custom_id="oyb:link-unlink", style=discord.ButtonStyle.danger)
-    async def unlink(self, interaction, button):
-        if not can_review(interaction, self.bot.config.guild_id):
-            await interaction.response.send_message("Only admins with Manage Server can remove links.", ephemeral=True)
-            return
-        await interaction.response.send_message("Remove a member's Reforger link (use for abuse or a bad link).",
-                                                view=UnlinkView(self.bot, interaction.user.id), ephemeral=True)
-
-    @discord.ui.button(label="Admin: force-link", custom_id="oyb:link-force", style=discord.ButtonStyle.secondary)
-    async def force(self, interaction, button):
-        if not can_review(interaction, self.bot.config.guild_id):
-            await interaction.response.send_message("Only admins with Manage Server can force-link.", ephemeral=True)
-            return
-        await interaction.response.send_modal(ForceLinkModal(self.bot, interaction.user.id))
+    # Review, force-link and unlink moved to the pinned panel in the staff-only
+    # link-request channel; members should not see admin buttons at all.
 
 
 async def prepare_join_channel(bot, guild, overwrites):

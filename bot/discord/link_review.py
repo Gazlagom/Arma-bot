@@ -43,12 +43,53 @@ def _overwrites(guild, reviewer_role=None):
     return result
 
 
-class AlertsControlView(discord.ui.View):
+class AdminPanelView(discord.ui.View):
+    """Every admin control in one pinned message, in the staff-only channel.
+
+    These used to sit on the public #join-oyb panel where members could see
+    them, so they live here now and that panel keeps only member buttons.
+    """
+
     def __init__(self, bot):
         super().__init__(timeout=None)
         self.bot = bot
 
-    @discord.ui.button(label="🔔 Toggle my alerts", style=discord.ButtonStyle.primary,
+    async def _guard(self, interaction, what):
+        if can_review(interaction, self.bot.config.guild_id):
+            return True
+        await interaction.response.send_message(f"Only staff with Manage Server can {what}.", ephemeral=True)
+        return False
+
+    @discord.ui.button(label="Pending requests", emoji="📋", style=discord.ButtonStyle.primary,
+                       custom_id="oyb:admin:pending")
+    async def pending(self, interaction, button):
+        if not await self._guard(interaction, "review requests"):
+            return
+        from bot.discord.join_oyb import ReviewList
+        rows = self.bot.account_links.pending(interaction.guild_id)
+        await interaction.response.send_message(
+            "Pending requests (up to 25; reopen after reviewing for more)." if rows else "No pending requests.",
+            view=ReviewList(self.bot, rows, interaction.user.id) if rows else None, ephemeral=True)
+
+    @discord.ui.button(label="Force-link", emoji="➕", style=discord.ButtonStyle.secondary,
+                       custom_id="oyb:admin:forcelink")
+    async def force(self, interaction, button):
+        if not await self._guard(interaction, "force-link"):
+            return
+        from bot.discord.join_oyb import ForceLinkModal
+        await interaction.response.send_modal(ForceLinkModal(self.bot, interaction.user.id))
+
+    @discord.ui.button(label="Remove a link", emoji="🗑", style=discord.ButtonStyle.danger,
+                       custom_id="oyb:admin:unlink")
+    async def unlink(self, interaction, button):
+        if not await self._guard(interaction, "remove links"):
+            return
+        from bot.discord.join_oyb import UnlinkView
+        await interaction.response.send_message(
+            "Remove a member's Reforger link (use for abuse or a bad link).",
+            view=UnlinkView(self.bot, interaction.user.id), ephemeral=True)
+
+    @discord.ui.button(label="Toggle my alerts", emoji="🔔", style=discord.ButtonStyle.secondary,
                        custom_id="oyb:linkalerts:toggle")
     async def toggle(self, interaction, button):
         if not can_review(interaction, self.bot.config.guild_id):
@@ -84,6 +125,31 @@ class ReviewButtons(discord.ui.View):
                 return text[len(TOKEN_PREFIX):].strip()
         return None
 
+    async def _settle_conflict(self, interaction, token, reason):
+        """A request that cannot be approved is finished, so close it here.
+
+        Leaving it pending is what stranded requests before: the queue kept
+        showing work nobody could action. The member is told directly, because
+        they cannot see this channel.
+        """
+        links = self.bot.account_links
+        request = links.request(interaction.guild_id, token)
+        if request and request[3] == "pending":
+            try:
+                links.review(interaction.guild_id, token, interaction.user.id, False)
+            except LinkConflict:
+                pass  # settled by someone else in the meantime; nothing to close
+            await notify_member(self.bot, interaction.guild, request[0], reason)
+        embed = interaction.message.embeds[0] if interaction.message.embeds else None
+        if embed is not None:
+            embed.colour = discord.Colour(0xE74C3C)
+            embed.add_field(name="🚫 Auto-rejected", value=reason, inline=False)
+            embed.set_footer(text=HANDLED_MARKER)
+            await interaction.message.edit(embed=embed, view=None,
+                                           allowed_mentions=discord.AllowedMentions.none())
+        else:
+            await interaction.message.edit(view=None)
+
     async def _decide(self, interaction, approve):
         if not can_review(interaction, self.bot.config.guild_id):
             await interaction.response.send_message("Only staff with Manage Server can review requests.", ephemeral=True)
@@ -96,7 +162,7 @@ class ReviewButtons(discord.ui.View):
             self.bot.account_links.review(interaction.guild_id, token, interaction.user.id, approve)
         except LinkConflict as exc:
             await interaction.response.send_message(str(exc), ephemeral=True)
-            await interaction.message.edit(view=None)  # already handled elsewhere
+            await self._settle_conflict(interaction, token, str(exc))
             return
         embed = interaction.message.embeds[0]
         embed.colour = discord.Colour(0x2ECC71 if approve else 0xE74C3C)
@@ -113,6 +179,48 @@ class ReviewButtons(discord.ui.View):
     @discord.ui.button(label="Reject", style=discord.ButtonStyle.danger, custom_id="oyb:linkreview:reject")
     async def reject(self, interaction, button):
         await self._decide(interaction, False)
+
+
+async def notify_member(bot, guild, discord_id, reason):
+    """Tell a member their request was closed. DM first; if their DMs are shut,
+    say it in the join channel where they asked, so the answer still reaches
+    them. Never raises - a failed notice must not break the review."""
+    text = (f"Your OYB Reforger link request could not be completed: {reason}\n"
+            "Ask an admin if you think that is wrong.")
+    member = guild.get_member(discord_id) if guild else None
+    if member is not None:
+        try:
+            await member.send(text)
+            return True
+        except discord.HTTPException:
+            LOG.info("DMs closed for %s; falling back to the join channel", discord_id)
+    row = bot.account_links.db.execute(
+        "SELECT channel FROM join_channel WHERE guild=?", (guild.id,)).fetchone() if guild else None
+    channel = guild.get_channel(row[0]) if row and row[0] else None
+    if isinstance(channel, discord.TextChannel):
+        try:
+            await channel.send(content=f"<@{discord_id}> {text}", silent=True,
+                               allowed_mentions=discord.AllowedMentions(users=True))
+            return True
+        except discord.HTTPException:
+            LOG.warning("Could not tell %s their request was closed", discord_id)
+    return False
+
+
+def admin_panel_embed(links, guild_id):
+    """The pinned staff panel. pending() caps at 25, so a full page reads 25+."""
+    waiting = len(links.pending(guild_id))
+    queue = "nothing waiting" if not waiting else f"**{waiting}{'+' if waiting >= 25 else ''}** waiting for review"
+    embed = discord.Embed(title="OYB admin panel", colour=0x5865F2, description=(
+        f"Link requests: {queue}.\n\n"
+        "📋 **Pending requests** — work through the queue.\n"
+        "➕ **Force-link** — link a member yourself when the name lookup can't.\n"
+        "🗑 **Remove a link** — unlink an account; tracked playtime is kept.\n"
+        "🔔 **Toggle my alerts** — start or stop being pinged on each new request.\n\n"
+        "New requests also post below with **Approve / Reject** on them. "
+        "Only staff can see this channel."))
+    embed.set_footer(text=CONTROL_MARKER)
+    return embed
 
 
 async def prepare_review_channel(bot, guild):
@@ -151,16 +259,12 @@ async def prepare_review_channel(bot, guild):
                     e.footer.text == CONTROL_MARKER for e in message.embeds):
                 control = message
                 break
-    embed = discord.Embed(title="Link request alerts", colour=0x5865F2, description=(
-        "New account-link requests appear here with **Approve / Reject** buttons.\n\n"
-        "Press **🔔 Toggle my alerts** to start or stop being pinged on each new request. "
-        "Only staff can see this channel."))
-    embed.set_footer(text=CONTROL_MARKER)
+    embed = admin_panel_embed(links, guild.id)
     if control is None:
-        control = await channel.send(embed=embed, view=AlertsControlView(bot),
+        control = await channel.send(embed=embed, view=AdminPanelView(bot),
                                      allowed_mentions=discord.AllowedMentions.none())
     else:
-        await control.edit(embed=embed, view=AlertsControlView(bot),
+        await control.edit(embed=embed, view=AdminPanelView(bot),
                            allowed_mentions=discord.AllowedMentions.none())
     if not control.pinned:
         try:
