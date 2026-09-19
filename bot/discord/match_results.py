@@ -4,7 +4,7 @@ import logging
 
 import discord
 
-from bot.config import game_leaderboard_channel_id
+from bot.config import game_leaderboard_channel_id, live_board_channel_id
 from bot.discord.leaderboard_command import table
 from bot.storage.combat_store import record_match, window_standings
 
@@ -12,7 +12,9 @@ LOG = logging.getLogger('reforger.match')
 # The log ingestor polls every 15s, so wait a few cycles for the closing kills
 # to land before counting the match.
 SETTLE = 45
-LIMIT = 25
+# A Discord embed description tops out at 4096 characters; a full 128-slot
+# match is past that, so the board runs on across as many embeds as it needs.
+CHUNK = 3800
 
 
 def duration(start, end):
@@ -21,15 +23,33 @@ def duration(start, end):
     return f'{hours}h {minutes}m' if hours else f'{minutes}m'
 
 
-def match_embed(server_name, rows, start, end):
-    embed = discord.Embed(title=f'🏁 Match results — {server_name}'[:256], colour=0xA9BC8C)
-    embed.description = table(rows[:LIMIT])
-    shown = f' • top {LIMIT} of {len(rows)}' if len(rows) > LIMIT else ''
+def pages(rows):
+    """Split the board so each block fits one embed. Everyone who fought is
+    listed - an end-of-game board that stops at the top 25 is half a board."""
+    result, start = [], 0
+    while start < len(rows):
+        size = len(rows) - start
+        while size > 1 and len(table(rows[start:start + size], start)) > CHUNK:
+            size -= 1
+        result.append(table(rows[start:start + size], start))
+        start += size
+    return result
+
+
+def match_embeds(server_name, rows, start, end):
+    blocks = pages(rows)
     closed = f'{end:%H:%M}' if start.date() == end.date() else f'{end:%d %b %H:%M}'
-    embed.set_footer(text=f'{len(rows)} players{shown} • {duration(start, end)} • '
-                          f'{start:%d %b %H:%M}–{closed}\n'
-                          'Player kills only • Counts toward the weekly board')
-    return embed
+    embeds = []
+    for index, block in enumerate(blocks):
+        embed = discord.Embed(colour=0xA9BC8C, description=block)
+        if index == 0:
+            embed.title = f'🏁 Match results — {server_name}'[:256]
+        if index == len(blocks) - 1:
+            embed.set_footer(text=f'{len(rows)} players • {duration(start, end)} • '
+                                  f'{start:%d %b %H:%M}–{closed}\n'
+                                  'Player kills only • Counts toward the weekly board')
+        embeds.append(embed)
+    return embeds
 
 
 class MatchResults:
@@ -80,13 +100,21 @@ class MatchResults:
             channel = await self.channel(guild)
             if channel is None:
                 return
+            if live_board_channel_id() == channel.id:
+                # The live board already stands in this channel as the final
+                # result; a second post would just repeat it.
+                LOG.info('Live board owns %s; skipping the results post', channel.id)
+                return
             rows = self.rows(guild, start, end, server_id)
             if not rows:
                 # An empty board after every quiet match would just be noise.
                 LOG.info('No linked-player kills in the %s match; nothing to post', server_name)
                 return
-            await channel.send(embed=match_embed(server_name, rows, start, end), silent=True,
-                               allowed_mentions=discord.AllowedMentions.none())
+            # One message per block: several embeds in a single message share a
+            # 6000-character budget that a full server would blow through.
+            for embed in match_embeds(server_name, rows, start, end):
+                await channel.send(embed=embed, silent=True,
+                                   allowed_mentions=discord.AllowedMentions.none())
             LOG.info('Posted match results for %s (%s players)', server_name, len(rows))
         except asyncio.CancelledError:
             raise

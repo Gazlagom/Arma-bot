@@ -11,7 +11,7 @@ import discord
 
 from bot.storage.account_links import AccountLinks
 from bot.storage.combat_store import migrate, stamp
-from bot.discord.match_results import LIMIT, MatchResults, duration, match_embed
+from bot.discord.match_results import CHUNK, MatchResults, duration, match_embeds
 
 OTHER = '99999999-9999-9999-9999-999999999999'
 START = datetime(2026, 9, 14, 20, 0)
@@ -30,20 +30,29 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(duration(END, START), '0m')
 
     def test_embed_lists_players_and_the_match_window(self):
-        embed = match_embed('OYB Classic', rows(3), START, END)
+        embed, = match_embeds('OYB Classic', rows(3), START, END)
         self.assertIn('OYB Classic', embed.title)
         self.assertRegex(embed.description, r'Player 0\s+3\s+0')
         self.assertIn('3 players', embed.footer.text)
         self.assertIn('1h 35m', embed.footer.text)
         self.assertIn('20:00', embed.footer.text)
 
-    def test_big_match_is_capped_and_says_so(self):
-        embed = match_embed('OYB Classic', rows(LIMIT + 6), START, END)
-        self.assertEqual(embed.description.count('\n'), LIMIT + 2)  # header + fence
-        self.assertIn(f'top {LIMIT} of {LIMIT + 6}', embed.footer.text)
+    def test_a_full_server_is_listed_in_full_across_embeds(self):
+        # An end-of-game board names everyone who fought, not a top 25.
+        embeds = match_embeds('OYB Classic', rows(128), START, END)
+        listed = sum(len(e.description.splitlines()) - 3 for e in embeds)
+        self.assertEqual(listed, 128)
+        self.assertGreater(len(embeds), 1)  # 128 does not fit one embed
+        for embed in embeds:
+            self.assertLessEqual(len(embed.description), CHUNK)
+        self.assertIn('OYB Classic', embeds[0].title)
+        self.assertIsNone(embeds[0].footer.text)      # footer closes the board
+        self.assertIn('128 players', embeds[-1].footer.text)
+        # Numbering runs on across the break rather than restarting.
+        self.assertIn('128', embeds[-1].description)
 
     def test_names_cannot_escape_the_table(self):
-        embed = match_embed('OYB', [('```\n@everyone\r\n' + 'X' * 90, 1, 0)], START, END)
+        embed, = match_embeds('OYB', [('```\n@everyone\r\n' + 'X' * 90, 1, 0)], START, END)
         self.assertEqual(embed.description.count('```'), 2)
 
 
@@ -58,6 +67,7 @@ class PublishTests(unittest.IsolatedAsyncioTestCase):
         token = self.links.submit(1, 10, self.identity, 'Test Player')
         self.links.review(1, token, 99, True)
         self.channel = MagicMock(spec=discord.TextChannel)
+        self.channel.id = 555
         self.channel.send = AsyncMock()
         self.channels = {555: self.channel}
         self.guild = SimpleNamespace(id=1, get_channel=self.channels.get,
@@ -111,6 +121,17 @@ class PublishTests(unittest.IsolatedAsyncioTestCase):
         self.kill('self', START + timedelta(minutes=2), self.identity, self.identity)
         await self.publish()
         self.channel.send.assert_not_awaited()
+
+    async def test_the_live_board_replaces_the_results_post_in_its_own_channel(self):
+        self.kill('during', START + timedelta(minutes=10), OTHER, self.identity)
+        with patch.dict(os.environ, {'LIVE_BOARD_CHANNEL_ID': '555'}):
+            await self.publish()
+        # One message per match: the live board in that channel is the result.
+        self.channel.send.assert_not_awaited()
+        # Pointed anywhere else - a test channel - the results board still posts.
+        with patch.dict(os.environ, {'LIVE_BOARD_CHANNEL_ID': '777'}):
+            await self.publish()
+        self.channel.send.assert_awaited_once()
 
     async def test_the_match_channel_is_configured_without_a_dotenv_entry(self):
         from bot.config import MATCH_LEADERBOARD_CHANNEL, game_leaderboard_channel_id
