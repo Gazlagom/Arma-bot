@@ -8,6 +8,8 @@ import logging
 
 import discord
 
+from bot.discord.interactions import ack, say
+
 LOG = logging.getLogger("reforger.factions")
 
 PICKER_MARKER = "OYB • Faction picker"
@@ -26,6 +28,15 @@ def current_faction(bot, guild, member):
         if role is not None and role in member.roles:
             return name
     return None
+
+
+def held_faction(bot, guild, member_id):
+    """The member's faction when only their id is to hand. Their role is the
+    truth; the saved pick covers a member the gateway cache has not loaded."""
+    member = guild.get_member(member_id)
+    if member is not None:
+        return current_faction(bot, guild, member)
+    return bot.account_links.faction(guild.id, member_id)
 
 
 async def ensure_faction_roles(bot, guild):
@@ -82,13 +93,14 @@ class FactionView(discord.ui.View):
 
         async def pick(interaction):
             if interaction.guild_id != self.bot.config.guild_id:
-                await interaction.response.send_message("Use this in the OYB server.", ephemeral=True)
+                await say(interaction, "Use this in the OYB server.")
                 return
+            # Two role calls follow; acknowledge before making them.
+            await ack(interaction)
             held = current_faction(self.bot, interaction.guild, interaction.user)
             if held is not None:
-                await interaction.response.send_message(
-                    f"You're locked to **{held}**. Ask an admin if you need to switch sides.",
-                    ephemeral=True)
+                await say(interaction,
+                          f"You're locked to **{held}**. Ask an admin if you need to switch sides.")
                 return
             try:
                 await apply_faction(self.bot, interaction.guild, interaction.user, name)
@@ -96,7 +108,7 @@ class FactionView(discord.ui.View):
                         f"{name} channels — see you out there.")
             except discord.Forbidden:
                 text = "I need Manage Roles, and my role must sit above the faction roles. Ask an admin."
-            await interaction.response.send_message(text, ephemeral=True)
+            await say(interaction, text)
 
         button.callback = pick
         return button
