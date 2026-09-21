@@ -140,6 +140,17 @@ class NotificationBot(TimerBot):
         self.add_view(OnboardingView(self))
         self._jobs.append(asyncio.create_task(self.rank_command.register()))
 
+    async def on_member_join(self, member):
+        """Label an arrival so staff can see who is still at the gate. Needs
+        ENABLE_MEMBERS_INTENT; without it Discord never sends this event."""
+        if member.guild.id != self.config.guild_id:
+            return
+        try:
+            from bot.discord.onboarding import mark_unverified
+            await mark_unverified(self, member.guild, member)
+        except Exception:
+            logger.exception("Could not label %s unverified", member.id)
+
     async def on_message(self, message):
         await award_message(self, message)
 
@@ -156,12 +167,25 @@ class NotificationBot(TimerBot):
                 await self.close()
                 return
             try:
-                await self.prepare_servers(guild)
+                # Each piece is set up on its own. One channel the bot cannot
+                # touch used to abort the whole sequence, so a single bad
+                # permission took the linking panel and onboarding down with it.
+                try:
+                    await self.prepare_servers(guild)
+                except Exception:
+                    logger.exception("Servers channel unavailable; the rest of setup continues")
                 try:
                     await self.prepare_announcement_channel(guild)
                 except Exception:
                     logger.exception("Announcements channel unavailable; alerts fall back to #servers")
-                await prepare_join_channel(self, guild, readonly_overwrites(guild, hidden=staging_enabled()))
+                try:
+                    from bot.config import onboarding_channel_id
+                    # The Start here panel carries the linking button, so a
+                    # separate #join-oyb would be a second door to the same room.
+                    if onboarding_channel_id() is None:
+                        await prepare_join_channel(self, guild, readonly_overwrites(guild, hidden=staging_enabled()))
+                except Exception:
+                    logger.exception("Join OYB channel unavailable; check Manage Channels")
                 try:
                     from bot.config import faction_channel_id
                     from bot.discord.factions import prepare_faction_picker
@@ -172,9 +196,12 @@ class NotificationBot(TimerBot):
                             logger.warning("FACTION_CHANNEL_ID %s is not a text channel I can see", pinned)
                             target = None
                     else:
+                        from bot.config import onboarding_channel_id
                         row = self.account_links.db.execute(
                             "SELECT channel FROM join_channel WHERE guild=?", (guild.id,)).fetchone()
                         target = guild.get_channel(row[0]) if row else None
+                        if target is None and onboarding_channel_id():
+                            target = guild.get_channel(onboarding_channel_id())
                     if isinstance(target, discord.TextChannel):
                         await prepare_faction_picker(self, guild, target)
                 except Exception:

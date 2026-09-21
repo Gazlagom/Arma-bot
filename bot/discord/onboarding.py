@@ -9,12 +9,15 @@ import logging
 import discord
 
 from bot.config import member_role_name, unverified_role_name
-from bot.discord.factions import FACTIONS, apply_faction, current_faction
+from bot.discord.factions import FACTIONS, apply_faction, current_faction, ensure_faction_roles
 from bot.discord.interactions import ack, say
 from bot.discord.join_oyb import LinkModal
 
 LOG = logging.getLogger('reforger.onboarding')
 MARKER = 'OYB • Start here'
+# Recorded when somebody chooses to stay Renegade, so the checklist can tell a
+# deliberate choice apart from a step nobody has got round to yet.
+NO_FACTION = 'NONE'
 
 
 def by_name(guild, name):
@@ -56,6 +59,47 @@ async def ensure_member_role(guild):
     return role
 
 
+async def ensure_unverified_role(guild):
+    """Create the label role if it is wanted and missing. Nothing gates on it,
+    so a server that leaves UNVERIFIED_ROLE_NAME blank simply has none."""
+    name = unverified_role_name()
+    if not name:
+        return None
+    existing = by_name(guild, name)
+    if existing is not None:
+        return existing
+    if any(r.name == name for r in guild.roles):
+        return None
+    me = guild.me
+    if me is None or not me.guild_permissions.manage_roles:
+        LOG.warning('Cannot create %r without Manage Roles', name)
+        return None
+    return await guild.create_role(name=name, permissions=discord.Permissions.none(),
+                                   mentionable=False, reason='OYB onboarding: unverified label')
+
+
+async def mark_unverified(bot, guild, member):
+    """Label somebody who has arrived but not linked yet.
+
+    Only a label. Channel access hangs off the member role instead, because a
+    role handed out on join is simply absent while the bot is down, and a gate
+    built on an absent role lets everyone through.
+    """
+    if member.bot:
+        return False
+    if by_name(guild, member_role_name()) in member.roles:
+        return False
+    role = by_name(guild, unverified_role_name())
+    if not grantable(guild, role) or role in member.roles:
+        return False
+    try:
+        await member.add_roles(role, reason='OYB onboarding: not linked yet')
+        return True
+    except discord.HTTPException:
+        LOG.warning('Could not label %s unverified', member.id)
+        return False
+
+
 async def verify(bot, guild, member):
     """Give the member role, take the unverified one. Returns a message to show."""
     member_role = by_name(guild, member_role_name())
@@ -83,17 +127,24 @@ def progress(bot, guild, member):
     verified = member_role is not None and member_role in member.roles
     faction = current_faction(bot, guild, member)
     identities = links.identities(guild.id, member.id)
-    lines = [f"{'✅' if verified else '⬜'} **1.** Rules accepted",
-             f"{'✅' if faction else '⬜'} **2.** Faction" + (f" — **{faction}**" if faction else '')]
+    chose = links.faction(guild.id, member.id) == NO_FACTION
     if identities:
-        lines.append(f"✅ **3.** Reforger account linked ({len(identities)})")
+        lines = [f'✅ **1.** Reforger account linked ({len(identities)})']
     else:
-        lines.append('⬜ **3.** Reforger account — ' +
-                     links.status(guild.id, member.id).split('.')[0].lower())
-    if verified and faction and identities:
-        lines.append('\nAll done. ' + bot.rank_sync.status(member.id))
-    elif not faction:
-        lines.append('\nYou stay **OYB Renegade** until you pick a side.')
+        lines = ['⬜ **1.** Reforger account — ' +
+                 links.status(guild.id, member.id).split('.')[0].lower()]
+    if faction:
+        lines.append(f'✅ **2.** Side — **{faction}**')
+    elif chose:
+        lines.append('✅ **2.** Side — none, by choice')
+    else:
+        lines.append('⬜ **2.** Side — not picked')
+    if identities and verified:
+        lines.append('\nYou are in. ' + bot.rank_sync.status(member.id))
+    elif identities and not verified:
+        lines.append('\nYour link is in and waiting on an admin.')
+    if not faction:
+        lines.append('You stay **OYB Renegade** without a side.')
     return '\n'.join(lines)
 
 
@@ -103,6 +154,7 @@ class OnboardingView(discord.ui.View):
         self.bot = bot
         for name, _, emoji in FACTIONS:
             self.add_item(self._faction(name, emoji))
+        self.add_item(self._no_faction())
 
     async def interaction_check(self, interaction):
         if interaction.guild_id == self.bot.config.guild_id:
@@ -123,9 +175,11 @@ class OnboardingView(discord.ui.View):
                           f"You're locked to **{held}**. Ask an admin if you need to switch sides.")
                 return
             try:
-                await apply_faction(self.bot, interaction.guild, interaction.user, name)
-                text = (f"You're **{name}** now, and locked to it. That's you off Renegade — "
-                        'step 3, link your game account.')
+                if await apply_faction(self.bot, interaction.guild, interaction.user, name) is None:
+                    await say(interaction, f'The **{name}** role is missing on this server. '
+                                           'Ask an admin to restart the bot so it can make it.')
+                    return
+                text = f"You're **{name}** now, and locked to it. That's you off Renegade."
             except discord.Forbidden:
                 text = 'I need Manage Roles, and my role must sit above the faction roles. Ask an admin.'
             await say(interaction, text)
@@ -133,17 +187,27 @@ class OnboardingView(discord.ui.View):
         button.callback = pick
         return button
 
-    @discord.ui.button(label='1. Accept the rules', row=0, style=discord.ButtonStyle.success,
-                       custom_id='oyb:onboard:verify')
-    async def accept(self, interaction, button):
-        await ack(interaction)
-        try:
-            text = await verify(self.bot, interaction.guild, interaction.user)
-        except discord.Forbidden:
-            text = 'I need Manage Roles for that, and my role must sit above the member role.'
-        await say(interaction, text)
+    def _no_faction(self):
+        """Staying Renegade on purpose is a choice, not an unfinished step."""
+        button = discord.ui.Button(label='No faction', row=1,
+                                   style=discord.ButtonStyle.secondary,
+                                   custom_id='oyb:onboard:faction:none')
 
-    @discord.ui.button(label='3. Link Reforger account', row=0, style=discord.ButtonStyle.primary,
+        async def skip(interaction):
+            await ack(interaction)
+            held = current_faction(self.bot, interaction.guild, interaction.user)
+            if held is not None:
+                await say(interaction,
+                          f"You're already **{held}**. Ask an admin if you want that removed.")
+                return
+            self.bot.account_links.set_faction(interaction.guild_id, interaction.user.id, NO_FACTION)
+            await say(interaction, 'No side for you then. You stay **OYB Renegade** — press a '
+                                   'faction any time you change your mind.')
+
+        button.callback = skip
+        return button
+
+    @discord.ui.button(label='1. Link Reforger account', row=0, style=discord.ButtonStyle.success,
                        custom_id='oyb:onboard:link')
     async def link(self, interaction, button):
         await interaction.response.send_modal(LinkModal(self.bot))
@@ -156,14 +220,15 @@ class OnboardingView(discord.ui.View):
 
 def panel_embed():
     return discord.Embed(title='Start here', colour=0xA9BC8C, description=(
-        'Three steps and you\'re playing.\n\n'
-        '**1. Accept the rules.** Opens up the rest of the server.\n\n'
-        '**2. Pick your faction** — US, USSR or FIA. Colours your name, gets you into that '
-        'side\'s channels, and takes you off **OYB Renegade**. You\'re locked to it after, so '
-        'pick the one your mates are on.\n\n'
-        '**3. Link your Reforger account.** Put in your in-game name or your player ID. An '
-        'admin approves it and your kills, deaths and playtime start counting towards your rank '
-        'and the leaderboards.\n\n'
+        '**1. Link your Reforger account.** Play a round on one of our servers first so we can '
+        'find you, then press the button and put in your in-game name or your player ID.\n\n'
+        'If the name is yours and nobody has claimed it, you are in straight away. If we cannot '
+        'match it, it goes to an admin to sort out.\n\n'
+        '**This is what opens up the rest of the server**, and it starts your kills, deaths and '
+        'playtime counting towards your rank and the leaderboards.\n\n'
+        '**2. Pick your side** — US, USSR or FIA. Colours your name, gets you into that side\'s '
+        'channels, and takes you off **OYB Renegade**. You are locked to it after, so pick the '
+        'one your mates are on. Not fussed? Press **No faction** and stay Renegade.\n\n'
         'Stuck? Press **My progress** to see what you still need.')
     ).set_footer(text=MARKER)
 
@@ -171,6 +236,11 @@ def panel_embed():
 async def prepare_onboarding(bot, guild, channel):
     """Post or refresh the panel. Edits our own message rather than piling up."""
     await ensure_member_role(guild)
+    await ensure_unverified_role(guild)
+    # The panel offers the faction buttons, so it owns making sure the roles
+    # they hand out exist. They used to be created only by the separate faction
+    # picker, which a server without one configured never sets up.
+    await ensure_faction_roles(bot, guild)
     embed, view = panel_embed(), OnboardingView(bot)
     async for message in channel.history(limit=50):
         if message.author.id == bot.user.id and any(

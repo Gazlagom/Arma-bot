@@ -169,6 +169,11 @@ class ReviewButtons(discord.ui.View):
             await say(interaction, str(exc))
             await self._settle_conflict(interaction, token, str(exc))
             return
+        if approve:
+            from bot.discord.join_oyb import grant_member
+            row = self.bot.account_links.request(interaction.guild_id, token)
+            if row:
+                await grant_member(self.bot, interaction.guild, row[0])
         embed = interaction.message.embeds[0]
         embed.colour = discord.Colour(0x2ECC71 if approve else 0xE74C3C)
         embed.add_field(name="✅ Approved" if approve else "🚫 Rejected",
@@ -199,9 +204,13 @@ async def notify_member(bot, guild, discord_id, reason):
             return True
         except discord.HTTPException:
             LOG.info("DMs closed for %s; falling back to the join channel", discord_id)
+    from bot.config import onboarding_channel_id
     row = bot.account_links.db.execute(
         "SELECT channel FROM join_channel WHERE guild=?", (guild.id,)).fetchone() if guild else None
     channel = guild.get_channel(row[0]) if row and row[0] else None
+    if channel is None and guild is not None and onboarding_channel_id():
+        # No #join-oyb on a server that uses the panel instead; say it there.
+        channel = guild.get_channel(onboarding_channel_id())
     if isinstance(channel, discord.TextChannel):
         try:
             await channel.send(content=f"<@{discord_id}> {text}", silent=True,
@@ -226,6 +235,32 @@ def admin_panel_embed(links, guild_id):
         "Only staff can see this channel."))
     embed.set_footer(text=CONTROL_MARKER)
     return embed
+
+
+async def post_auto_link(bot, guild, discord_id, identity, name):
+    """Tell the reviewers a link went through on its own.
+
+    No buttons: there is nothing to decide. It is here so the channel is a
+    complete record of who got linked and how, and so a wrong one can be
+    spotted and undone with Remove a link.
+    """
+    cfg = bot.account_links.review_settings(guild.id)
+    channel = guild.get_channel(cfg["channel"]) if cfg["channel"] else None
+    if not isinstance(channel, discord.TextChannel):
+        return False
+    embed = discord.Embed(colour=0x2ECC71, description=(
+        f"<@{discord_id}> linked to **{discord.utils.escape_markdown(name)}**\n"
+        f"Game identity: `{identity}`\n\n"
+        "Matched one tracked player that nobody had claimed, so it went through "
+        "without review. Use **Remove a link** if that is wrong."))
+    embed.set_footer(text="OYB • Linked automatically")
+    try:
+        await channel.send(embed=embed, silent=True,
+                           allowed_mentions=discord.AllowedMentions.none())
+        return True
+    except discord.HTTPException:
+        LOG.warning("Could not post the auto-link notice for %s", discord_id)
+        return False
 
 
 async def prepare_review_channel(bot, guild):
@@ -297,11 +332,17 @@ async def post_request_alert(bot, guild, token):
     discord_id, identity, name, _status, discord_name = request
     role = guild.get_role(cfg["reviewer_role"]) if cfg["reviewer_role"] else None
     who = discord.utils.escape_markdown(discord_name) + " " if discord_name else ""
+    if identity:
+        detail = (f"**Game identity:** `{identity}`\n\n"
+                  "Confirm ownership in-game before approving — a matching name alone is not proof.")
+    else:
+        detail = ("**Game identity:** not matched\n\n"
+                  "The tracker has no single player under that name, so there is nothing to "
+                  "approve. Use **Force-link** to pick their account, or **Reject** if they have "
+                  "not played here.")
     embed = discord.Embed(title="🔗 New link request", colour=0xF1C40F, description=(
         f"**Member:** {who}<@{discord_id}> (`{discord_id}`)\n"
-        f"**Reforger name:** {discord.utils.escape_markdown(name)}\n"
-        f"**Game identity:** `{identity}`\n\n"
-        "Confirm ownership in-game before approving — a matching name alone is not proof."))
+        f"**Reforger name:** {discord.utils.escape_markdown(name)}\n" + detail))
     embed.set_footer(text=TOKEN_PREFIX + token)
     await channel.send(
         content=role.mention if role else None, embed=embed, view=ReviewButtons(bot),

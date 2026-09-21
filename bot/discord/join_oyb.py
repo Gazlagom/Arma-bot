@@ -88,6 +88,25 @@ def play_summary(candidate):
     return f"{hours}h {mins:02d}m played" if hours else f"{minutes} min played"
 
 
+async def grant_member(bot, guild, discord_id):
+    """Open the server up now that the link stands. Never raises: a link is
+    still a link even if the role could not be handed out."""
+    member = guild.get_member(discord_id) if guild else None
+    if member is None and guild is not None:
+        try:
+            member = await guild.fetch_member(discord_id)
+        except discord.HTTPException:
+            member = None
+    if member is None:
+        return None
+    try:
+        from bot.discord.onboarding import verify
+        return await verify(bot, guild, member)
+    except Exception:
+        LOG.exception("Linked %s but could not give them the member role", discord_id)
+        return None
+
+
 class LinkModal(discord.ui.Modal, title="Link your Reforger account"):
     name_input = discord.ui.TextInput(
         label="In-game name, or your identity ID",
@@ -98,6 +117,36 @@ class LinkModal(discord.ui.Modal, title="Link your Reforger account"):
         super().__init__()
         self.bot = bot
 
+    async def _link_now(self, interaction, identity, name):
+        """Link straight away, or fall back to the admin queue."""
+        links = self.bot.account_links
+        links.auto_link(interaction.guild_id, interaction.user.id, identity, name,
+                        interaction.user.display_name)
+        await grant_member(self.bot, interaction.guild, interaction.user.id)
+        try:
+            from bot.discord.link_review import post_auto_link
+            await post_auto_link(self.bot, interaction.guild, interaction.user.id, identity, name)
+        except Exception:
+            LOG.exception("Linked %s but could not tell the reviewers", interaction.user.id)
+        return (f"Linked to **{discord.utils.escape_markdown(name)}** and you're in. "
+                "Your kills, deaths and playtime count from now on, and everything you have "
+                "already played is counted too.")
+
+    async def _ask_a_reviewer(self, interaction, typed, reason):
+        """Queue what they typed for an admin to place by hand."""
+        try:
+            token = self.bot.account_links.submit_unresolved(
+                interaction.guild_id, interaction.user.id, typed, interaction.user.display_name)
+        except LinkConflict as exc:
+            return str(exc)
+        try:
+            from bot.discord.link_review import post_request_alert
+            await post_request_alert(self.bot, interaction.guild, token)
+        except Exception:
+            LOG.exception("Could not post link-request alert for %s", interaction.user.id)
+        return (f"{reason}\n\nI've passed it to an admin to sort out — they'll match you up "
+                "and you'll hear back. Use **My progress** to check.")
+
     async def on_submit(self, interaction):
         if interaction.guild_id != self.bot.config.guild_id:
             await interaction.response.send_message("Use this in the OYB server.", ephemeral=True)
@@ -107,15 +156,14 @@ class LinkModal(discord.ui.Modal, title="Link your Reforger account"):
             typed = str(self.name_input).strip()
             identity = resolve_identity(os.getenv("PLAYTIME_DB", "data/playtime.sqlite3"), typed)
             name = known_name(os.getenv("PLAYTIME_DB", "data/playtime.sqlite3"), identity) or typed
-            token = self.bot.account_links.submit(interaction.guild_id, interaction.user.id, identity, name,
-                                                  interaction.user.display_name)
-            try:
-                from bot.discord.link_review import post_request_alert
-                await post_request_alert(self.bot, interaction.guild, token)
-            except Exception:
-                LOG.exception("Could not post link-request alert for %s", interaction.user.id)
-            text = "Request submitted for admin approval. Use My link status to check progress. Your tracked time is preserved."
-        except (ValueError, LinkConflict) as exc:
+            # The tracker matched one player and nobody has claimed them, so
+            # there is nothing for an admin to weigh up.
+            text = await self._link_now(interaction, identity, name)
+        except ValueError as exc:
+            # No match, or more than one. Neither is the member's problem to
+            # solve, so a reviewer picks it up rather than them hitting a wall.
+            text = await self._ask_a_reviewer(interaction, typed, str(exc))
+        except LinkConflict as exc:
             text = str(exc)
         except sqlite3.Error:
             text = "The playtime tracker is not ready yet. Please try again shortly."
@@ -270,6 +318,10 @@ class ForceLinkChoice(discord.ui.View):
             try:
                 bot.account_links.verified_link(interaction.guild_id, self.discord_id, identity,
                                                 f"admin:{interaction.user.id}")
+                # Whatever they asked for is now settled, and the link is what
+                # opens the server up.
+                bot.account_links.close_requests(interaction.guild_id, self.discord_id)
+                await grant_member(bot, interaction.guild, self.discord_id)
                 text = f"✅ Linked <@{self.discord_id}> to `{identity}`."
             except LinkConflict as exc:
                 text = f"⚠️ {exc}\nUse **Admin: remove a link** first if you need to move it."
