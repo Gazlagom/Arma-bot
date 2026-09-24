@@ -11,7 +11,7 @@ import discord
 
 from bot.storage.account_links import AccountLinks
 from bot.storage.combat_store import migrate, record_presence, stamp
-from bot.discord.live_board import MARKER, LiveBoard, board_embeds, ours
+from bot.discord.live_board import HOUSE, LIVE, MARKER, LiveBoard, board_embeds, ours
 
 OTHER = '99999999-9999-9999-9999-999999999999'
 START = datetime(2026, 9, 14, 20, 0)
@@ -37,6 +37,22 @@ class RenderTests(unittest.TestCase):
         self.assertIn('1h 35m', embed.footer.text)
         self.assertIn('20:00', embed.footer.text)
         self.assertIn('21:35', embed.footer.text)
+
+    def test_the_board_carries_the_matchs_own_number(self):
+        live, = board_embeds('OYB Classic', rows(3), START, tag='#0007B')
+        self.assertIn('#0007B', live.title)
+        self.assertIn('LIVE', live.title)
+        self.assertIn('OYB Classic', live.title)
+        # The same board keeps that number once it stands as the result.
+        done, = board_embeds('OYB Classic', rows(3), START, END, tag='#0007B')
+        self.assertIn('#0007B', done.title)
+
+    def test_a_running_board_is_green_and_a_finished_one_is_not(self):
+        running, = board_embeds('OYB Classic', rows(3), START)
+        done, = board_embeds('OYB Classic', rows(3), START, END)
+        self.assertEqual(running.colour.value, LIVE)
+        self.assertEqual(done.colour.value, HOUSE)
+        self.assertNotEqual(running.colour.value, done.colour.value)
 
     def test_a_full_server_still_fits_one_message(self):
         # Everyone who played is listed, and Discord allows 6000 characters
@@ -181,6 +197,45 @@ class TickTests(unittest.IsolatedAsyncioTestCase):
         await self.board.tick()
         self.channel.send.assert_not_awaited()
         self.assertEqual(self.board.matches, {})
+
+
+class NumberTests(unittest.TestCase):
+    """Each match is named #0001 upwards on its own server, with the server's
+    letter on the end, so two boards side by side can be told apart."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.links = AccountLinks(Path(self.tmp.name) / 'links.db')
+        self.addCleanup(self.links.close)
+        migrate(self.links.db)
+        self.board = LiveBoard(SimpleNamespace(account_links=self.links))
+
+    def tag(self, server_id, started):
+        with patch.dict(os.environ, {'LIVE_BOARD_CHANNEL_ID': '555'}):
+            self.board.start(server_id, 'OYB Classic', started)
+        return self.board.matches[server_id]['tag']
+
+    def test_each_match_on_a_server_takes_the_next_number(self):
+        self.assertEqual(self.tag('server-1', START), '#0001A')
+        self.assertEqual(self.tag('server-1', START + timedelta(hours=3)), '#0002A')
+        self.assertEqual(self.tag('server-1', START + timedelta(hours=6)), '#0003A')
+
+    def test_every_server_counts_on_its_own_and_keeps_its_letter(self):
+        self.assertEqual(self.tag('server-1', START), '#0001A')
+        self.assertEqual(self.tag('server-2', START), '#0001B')
+        self.assertEqual(self.tag('server-3', START + timedelta(minutes=20)), '#0001C')
+        self.assertEqual(self.tag('server-2', START + timedelta(hours=3)), '#0002B')
+
+    def test_a_restart_carries_on_with_the_same_number(self):
+        # Coming back up mid-match, the start is recovered from the log a few
+        # seconds off; that is the same game, not the next one.
+        self.assertEqual(self.tag('server-1', START), '#0001A')
+        self.assertEqual(self.tag('server-1', START + timedelta(seconds=4)), '#0001A')
+
+    def test_a_match_that_cannot_be_numbered_still_gets_a_board(self):
+        self.links.db.execute('DROP TABLE combat_match_numbers')
+        self.assertIsNone(self.tag('server-1', START))
 
 
 async def _drain(board):
