@@ -179,7 +179,8 @@ class OnboardingView(discord.ui.View):
                     await say(interaction, f'The **{name}** role is missing on this server. '
                                            'Ask an admin to restart the bot so it can make it.')
                     return
-                text = f"You're **{name}** now, and locked to it. That's you off Renegade."
+                text = (f"You're **{name}** on Discord now, and locked to it here. That's you "
+                        "off Renegade — play whatever side you like in game.")
             except discord.Forbidden:
                 text = 'I need Manage Roles, and my role must sit above the faction roles. Ask an admin.'
             await say(interaction, text)
@@ -220,16 +221,20 @@ class OnboardingView(discord.ui.View):
 
 def panel_embed():
     return discord.Embed(title='Start here', colour=0xA9BC8C, description=(
-        '**1. Link your Reforger account.** Play a round on one of our servers first so we can '
-        'find you, then press the button and put in your in-game name or your player ID.\n\n'
-        'If the name is yours and nobody has claimed it, you are in straight away. If we cannot '
-        'match it, it goes to an admin to sort out.\n\n'
-        '**This is what opens up the rest of the server**, and it starts your kills, deaths and '
-        'playtime counting towards your rank and the leaderboards.\n\n'
-        '**2. Pick your side** — US, USSR or FIA. Colours your name, gets you into that side\'s '
-        'channels, and takes you off **OYB Renegade**. You are locked to it after, so pick the '
-        'one your mates are on. Not fussed? Press **No faction** and stay Renegade.\n\n'
-        'Stuck? Press **My progress** to see what you still need.')
+        '**1 — Link your Reforger account**\n'
+        'Play a round on any OYB server, then hit **Link Reforger account** and type your '
+        'in-game name or player ID.\n\n'
+        'Name yours and unclaimed? You are in straight away. Otherwise an admin checks it.\n\n'
+        'Linking opens up the rest of the server and starts your kills, deaths and playtime '
+        'counting towards your rank.\n\n'
+        '**2 — Pick your side (optional)**\n'
+        '⚠️ **THIS DOES NOT LOCK YOUR FACTION IN GAME.** Play US, USSR or FIA on the '
+        'servers whenever you like. It is a Discord role and nothing else, and you can '
+        'skip it entirely.\n\n'
+        'If you want one: it colours your name, opens that side\'s channels and drops '
+        '**OYB Renegade**. You cannot swap it yourself on Discord after, so go with your '
+        'mates. Not fussed? Press **No faction**.\n\n'
+        'Stuck? **My progress** shows what you are missing.')
     ).set_footer(text=MARKER)
 
 
