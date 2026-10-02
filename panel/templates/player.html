@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% block title %}{{ player.name if player else identity }} · OYB Control{% endblock %}
+{% block body %}
+<p class="kicker">Player</p>
+<div class="row">
+  <h1>{{ player.name if player else (stats.name if stats and stats.name else "Unknown player") }}</h1>
+  {% if active %}<span class="badge down">Banned · {{ active.expires_at|until }}</span>{% endif %}
+</div>
+<p class="mono muted">{{ identity }}</p>
+
+{% include "_oyb.html" %}
+
+<div class="split">
+<section class="card">
+  <h2>History</h2>
+  {% if player %}
+  <p>First seen {{ player.first_seen|ts }}<br>Last seen {{ player.last_seen|ts }} on {{ player.last_server }}</p>
+  {% else %}
+  <p class="muted">The panel hasn't seen this player on a server.</p>
+  {% endif %}
+  {% if names|length > 1 %}
+  <h3>Names used</h3>
+  <ul>{% for n in names %}<li>{{ n.name }} <span class="muted">· {{ n.last_seen|ago }}</span></li>{% endfor %}</ul>
+  {% endif %}
+  {% if can("ban") and not active %}
+  <p><a class="button danger" href="/bans?identity={{ identity }}&name={{ (player.name if player else '')|urlencode }}">Ban</a></p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Admin notes</h2>
+  {% if can("notes") %}
+  <form method="post" action="/player/{{ identity }}/notes">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <textarea name="body" rows="3" maxlength="2000" placeholder="Visible to every admin, on every server" required></textarea>
+    <button>Add note</button>
+  </form>
+  {% endif %}
+  {% for n in notes %}
+  <div class="note"><p>{{ n.body }}</p><span class="muted">{{ n.author }} · {{ n.created_at|ts }}</span></div>
+  {% else %}
+  <p class="muted">No notes.</p>
+  {% endfor %}
+</section>
+</div>
+
+{% if can("ips") %}
+<section class="card">
+  <h2>Connections</h2>
+  {% if ips %}
+  <div class="scroll"><table>
+    <thead><tr><th>IP</th><th>Name</th><th>Server</th><th class="num">Times</th><th>First</th><th>Last</th></tr></thead>
+    <tbody>
+    {% for c in ips %}
+    <tr><td class="mono"><a href="/players?q={{ c.ip|urlencode }}">{{ c.ip }}</a>{% if c.ip in banned_ips %} <span class="pill down">Banned IP</span>{% endif %}</td><td>{{ c.name }}</td><td>{{ c.server }}</td>
+        <td class="num">{{ c.times }}</td><td>{{ c.first_seen|ts }}</td><td title="{{ c.last_seen|ts }}">{{ c.last_seen|ago }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% if ips[0].guid %}<p class="muted">BattlEye GUID <span class="mono">{{ ips[0].guid }}</span></p>{% endif %}
+  <h3>Other accounts on the same IP</h3>
+  {% if alts %}
+  <div class="scroll"><table>
+    <thead><tr><th>Name</th><th>Shared IP</th><th>Last seen</th><th></th></tr></thead>
+    <tbody>
+    {% for a in alts %}
+    <tr><td><a href="/player/{{ a.identity }}">{{ a.name }}</a></td><td class="mono">{{ a.shared }}</td>
+        <td>{{ a.last_seen|ago }}</td><td>{% if a.banned %}<span class="pill down">Banned</span>{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}
+  <p class="muted">None. No other account has connected from this player's IPs.</p>
+  {% endif %}
+  {% else %}
+  <p class="muted">No connections recorded yet. They're read from the server logs, so the server needs <code>log_dir</code> in panel.local.json.</p>
+  {% endif %}
+</section>
+{% endif %}
+
+<section class="card" id="kill-log">
+  <h2>Kill log</h2>
+  <p class="muted">Pulled from the server logs on every server, including saved games, so you don't have to dig through them. Times are the log's own.</p>
+  <form method="get" action="/player/{{ identity }}#kill-log" class="kill-form">
+    <select name="period">{% for value, label in kill_periods %}<option value="{{ value }}" {% if kills and kills.period == value and not kills.day %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+    <label class="inline-label">or day <input type="date" name="day" value="{{ kills.day if kills else '' }}"></label>
+    {% for value, label in kill_logs %}<button name="log" value="{{ value }}" class="small{{ '' if kills and kills.mode == value else ' ghost' }}">{{ label }}</button>{% endfor %}
+  </form>
+  {% if kills %}
+  <h3>{{ kills.title }} · {{ kills.label }} ({{ kills.lines|length }}{{ "+" if kills.full }})</h3>
+  {% if kills.lines %}
+  <div class="scroll"><table class="kill-log">
+    <thead><tr><th>When</th><th>Server</th><th>What happened</th><th>How</th><th></th></tr></thead>
+    <tbody>
+    {% for l in kills.lines %}
+    <tr {% if l.revenge %}class="revenge"{% endif %}>
+      <td class="mono nowrap">{{ l.stamp }}</td>
+      <td>{{ l.server }}</td>
+      <td class="wrap">
+        {% if l.row.killer and l.row.killer != identity %}<a href="/player/{{ l.row.killer }}">{{ l.killer }}</a>{% else %}<b>{{ l.killer }}</b>{% endif %}
+        {{ l.what }}
+        {% if l.row.killer != l.row.victim %}{% if l.row.victim != identity %}<a href="/player/{{ l.row.victim }}">{{ l.row.victim_name }}</a>{% else %}<b>{{ l.row.victim_name }}</b>{% endif %}{% endif %}
+        {% if l.revenge %}<br><span class="pill gold">Revenge?</span> <span class="muted">{{ l.revenge }}</span>{% endif %}
+      </td>
+      <td class="muted">{{ l.extra }}</td>
+      <td>{% if l.game %}<a href="/server/{{ l.row.server }}/game/{{ l.game }}">Game</a>{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% if kills.full %}<p class="muted">Showing the latest 500. Pick a shorter period or a single day to see the rest.</p>{% endif %}
+  <details class="copy-box">
+    <summary>Copy as text</summary>
+    <textarea readonly rows="8" class="mono" id="kill-text">{{ kills.text }}</textarea>
+    <button type="button" class="small" data-copy="#kill-text">Copy</button>
+  </details>
+  {% else %}
+  <p class="muted">Nothing found for that.</p>
+  {% endif %}
+  {% endif %}
+</section>
+
+{% if incidents %}
+<section class="card">
+  <h2>On at suspicious incidents ({{ incidents|length }})</h2>
+  <p class="muted">Bursts of explosions credited to AI, or a spike of script errors, while this player was connected. One is chance; the same name at several is worth spectating.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>When</th><th>Server</th><th>What happened</th></tr></thead>
+    <tbody>
+    {% for i in incidents %}
+    <tr><td>{{ i.at|ts }}</td><td>{{ i.server }}</td><td class="wrap">{{ i.text }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% endif %}
+
+{% if bans %}
+<section class="card">
+  <h2>Ban history</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>When</th><th>By</th><th>Reason</th><th>Status</th></tr></thead>
+    <tbody>
+    {% for b in bans %}
+    <tr>
+      <td>{{ b.created_at|ts }}</td>
+      <td>{{ b.created_by }}</td>
+      <td class="wrap">{{ b.reason }}</td>
+      <td>{% if b.removed_at %}Removed by {{ b.removed_by }}{% else %}{{ b.expires_at|until }}{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% endif %}
+{% endblock %}

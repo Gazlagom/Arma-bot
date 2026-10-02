@@ -19,6 +19,9 @@ from bot.discord.category_timer import CategoryTimers
 from bot.storage.account_links import AccountLinks
 from bot.discord.join_oyb import prepare_join_channel
 from bot.ranks.rank_sync import RankSync
+from bot.discord.ban_roles import BanRoles
+from bot.discord.ban_tickets import BanTickets
+from bot.discord.welcome import Welcome
 from bot.discord.rank_command import RankCommand
 from bot.storage.combat_store import migrate as migrate_combat
 from bot.tracking.combat_ingestor import CombatIngestor
@@ -50,16 +53,33 @@ def server_status_line(bot, server):
     return "🔴 Offline — server is not running."
 
 
+SERVERS_TITLE = "🎮 OYB Servers"
+SERVERS_INTRO = ("Live status for all OYB servers. When a match starts, the announcements channel "
+                 "pings whoever opted in to that server's alerts. This channel is read-only.")
+RULES_TITLE = "🎮 OYB · In-game rules"
+# Wording published from OYB Control; anything left blank there keeps the above.
+SERVER_INFO: dict = {}
+PING_TITLE = "🟢 {server} — match started"
+PING_TEXT = "A new match is live. Join the server!"
+# The match-started post, as published from OYB Control.
+MATCH_PING: dict = {}
+
+
+def ping_title(name):
+    return (MATCH_PING.get("title") or PING_TITLE).replace("{server}", name)[:256]
+
+
+def default_rules(bot):
+    return next((s.rules for s in bot.config.servers if s.enabled), bot.config.servers[0].rules)
+
+
 def servers_embed(bot):
     """One combined card: every server's live status and settings."""
-    embed = discord.Embed(
-        title="🎮 OYB Servers",
-        description="Live status for all OYB servers. When a match starts, the "
-                    "announcements channel pings whoever opted in to that server's "
-                    "alerts. This channel is read-only.",
-        colour=0x2ECC71)
+    embed = discord.Embed(title=SERVER_INFO.get("title") or SERVERS_TITLE,
+                          description=SERVER_INFO.get("intro") or SERVERS_INTRO, colour=0x2ECC71)
+    settings = SERVER_INFO.get("settings", {})
     for server in bot.config.servers:
-        value = f"{server_status_line(bot, server)}\n**Settings:** {server.settings}"
+        value = f"{server_status_line(bot, server)}\n**Settings:** {settings.get(server.id) or server.settings}"
         embed.add_field(name=label_for(server), value=value[:1024], inline=False)
     embed.set_footer(text=SERVERS_CARD_MARKER)
     return embed
@@ -67,9 +87,8 @@ def servers_embed(bot):
 
 def rules_embed(bot):
     """Universal in-game rules (identical across all servers), like the old cards."""
-    rules = next((s.rules for s in bot.config.servers if s.enabled),
-                 bot.config.servers[0].rules)
-    embed = discord.Embed(title="🎮 OYB · In-game rules", description=rules[:4096],
+    rules = SERVER_INFO.get("rules") or default_rules(bot)
+    embed = discord.Embed(title=SERVER_INFO.get("rules_title") or RULES_TITLE, description=rules[:4096],
                           colour=0x5865F2)
     embed.set_footer(text=RULES_MARKER)
     return embed
@@ -127,6 +146,9 @@ class NotificationBot(TimerBot):
         self.combat_ingestor = CombatIngestor(self)
         self.server_stats = ServerStats(self)
         self.maintenance = Maintenance(self)
+        self.ban_roles = BanRoles(self)
+        self.ban_tickets = BanTickets(self)
+        self.welcome = Welcome(self)
         self._boot_lock = asyncio.Lock()
         self._booted = False
 
@@ -148,14 +170,37 @@ class NotificationBot(TimerBot):
         ENABLE_MEMBERS_INTENT; without it Discord never sends this event."""
         if member.guild.id != self.config.guild_id:
             return
+        logger.info("%s joined the Discord", member.display_name)
         try:
             from bot.discord.onboarding import mark_unverified
             await mark_unverified(self, member.guild, member)
         except Exception:
             logger.exception("Could not label %s unverified", member.id)
+        try:
+            await self.welcome.greet(member)
+        except Exception:
+            logger.exception("Could not greet %s", member.id)
+
+    async def on_interaction(self, interaction):
+        try:
+            await self.welcome.handle(interaction)
+        except Exception:
+            logger.exception("Start here button failed")
 
     async def on_message(self, message):
         await award_message(self, message)
+
+    async def on_guild_channel_create(self, channel):
+        try:
+            await self.ban_tickets.channel_created(channel)
+        except Exception:
+            logger.exception("Checking new channel %s for a banned player failed", channel.id)
+
+    async def on_thread_create(self, thread):
+        try:
+            await self.ban_tickets.thread_created(thread)
+        except Exception:
+            logger.exception("Checking new thread %s for a banned player failed", thread.id)
 
     async def on_ready(self):
         if self.voice_channel_id:
@@ -264,6 +309,9 @@ class NotificationBot(TimerBot):
                     # Recovered old matches must not trigger a fresh notification.
                     if elapsed >= ANNOUNCEMENT_TTL:
                         return
+                    if server.id in MATCH_PING.get("off", []):
+                        logger.info("Match alerts for %s are turned off in OYB Control", server.id)
+                        return
                     now = time.time()
                     channel = self.announce_channel or self.channels_by_server.get(server.id)
                     if channel is None:
@@ -307,6 +355,8 @@ class NotificationBot(TimerBot):
             self._jobs.append(asyncio.create_task(self.live_board.run()))
             self._jobs.append(asyncio.create_task(self.server_stats.run()))
             self._jobs.append(asyncio.create_task(self.maintenance.run()))
+            self._jobs.append(asyncio.create_task(self.ban_roles.run()))
+            self._jobs.append(asyncio.create_task(self.welcome.run()))
             logger.info("Ready: one combined servers card + announcements channel; %s active game monitors",
                         len(self.monitors))
 
@@ -468,7 +518,7 @@ class NotificationBot(TimerBot):
             if candidate.author.id == self.user.id and any(
                 e.timestamp is not None
                 and int(e.timestamp.timestamp()) == int(row["started"])
-                and e.title == f"🟢 {row['name']} — match started"
+                and e.title in (ping_title(row["name"]), f"🟢 {row['name']} — match started")
                 for e in candidate.embeds
             ):
                 message = candidate
@@ -477,9 +527,10 @@ class NotificationBot(TimerBot):
             if time.time() >= row["started"] + ANNOUNCEMENT_TTL:
                 self.store.finish(row)
                 return
+            text = (MATCH_PING.get("text") or PING_TEXT).replace("{server}", row["name"])
             embed = discord.Embed(
-                title=f"🟢 {row['name']} — match started",
-                description=f"A new match is live. Join the server!\n"
+                title=ping_title(row["name"]),
+                description=f"{text}\n"
                             f"Started <t:{int(row['started'])}:R>.\n\n"
                             f"Expires <t:{int(row['started'] + ANNOUNCEMENT_TTL)}:R> "
                             "(30 minutes after match start).",
@@ -490,7 +541,7 @@ class NotificationBot(TimerBot):
             # Only the people who asked for this server's alerts. With no role
             # to mention the card still goes up, quietly, rather than falling
             # back to pinging the whole guild.
-            role = self.roles_by_server.get(row["server"])
+            role = self.roles_by_server.get(row["server"]) if MATCH_PING.get("ping", True) else None
             message = await channel.send(
                 content=role.mention if role is not None else None, embed=embed,
                 allowed_mentions=discord.AllowedMentions(

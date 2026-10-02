@@ -1,0 +1,168 @@
+"""Who connected from where, and the live feed, read from the console logs.
+
+BattlEye logs the IP when a player connects; the game logs their identity a
+moment later under the same name. Pairing the two gives identity, name and IP
+for every connection, which is what finds alt accounts sharing an address.
+Joins, leaves, kills and side picks along the way make up the live feed.
+"""
+
+import re
+import time
+from pathlib import Path
+
+from bot.tracking.combat_parser import HEADER as KILL, JOINED as SIDE, PERSON, damage_type, distance
+
+STAMP = re.compile(r"^(\d{2}):(\d{2}):(\d{2})")
+FOLDER = re.compile(r"logs_(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})$")
+CONNECT = re.compile(r"BattlEye Server: 'Player #\d+ (.+) \((.+):\d+\) connected'")
+LEAVE = re.compile(r"BattlEye Server: 'Player #\d+ (.+) disconnected'")
+GUID = re.compile(r"BattlEye Server: 'Player #\d+ (.+) - BE GUID: ([0-9a-fA-F]{32})'")
+IDENTITY = re.compile(r"### Updating player: PlayerId=\d+, Name=(.*?), rplIdentity=0x[0-9a-fA-F]+, "
+                      r"IdentityId=([0-9a-fA-F-]{36})")
+FPS = re.compile(r"\bFPS:\s*([0-9]+(?:\.[0-9]+)?)")
+ZONE = re.compile(r"to the '(\w+)' hit zone")
+VICTIM_AT = re.compile(r" at <(-?[\d.]+), -?[\d.]+, (-?[\d.]+)> was killed by ")
+KILLER_AT = re.compile(r"who was at that time at <(-?[\d.]+), -?[\d.]+, (-?[\d.]+)>")
+# A script exception's reason and class sit on untimestamped lines under it.
+VM_ERROR = re.compile(r"SCRIPT\s*\(E\): Virtual Machine Exception")
+VM_CLASS = re.compile(r"^Class:\s*'(\w+)'")
+SCRIPT_ERROR = re.compile(r"SCRIPT\s*\(E\).*(NULL pointer|INSTIGATOR_OTHER)")
+PENDING_SECONDS = 600
+
+
+def folder_start(folder: Path) -> float | None:
+    match = FOLDER.search(folder.name)
+    if not match:
+        return None
+    return time.mktime(tuple(int(x) for x in match.groups()) + (0, 0, -1))
+
+
+def new_state(base: float) -> dict:
+    return {"base": base, "clock": None, "day": 0, "pending": {}}
+
+
+def read_lines(lines, started: float) -> list[dict]:
+    """Every event in one whole log, for going back over a past game."""
+    reader, state = LogReader(""), new_state(started)
+    return [e for e in map(lambda line: reader._line(line.rstrip("\n"), state), lines) if e]
+
+
+class LogReader:
+    """Follows every logs_*/console.log under one server's log directory."""
+
+    def __init__(self, log_dir: str):
+        self.root = Path(log_dir)
+        self.files: dict[str, dict] = {}
+
+    def folders(self) -> list[Path]:
+        try:
+            found = [p for p in self.root.iterdir() if p.is_dir() and folder_start(p) is not None]
+        except OSError:
+            return []
+        return sorted(found, key=folder_start)
+
+    def scan(self, positions: dict[str, int]) -> tuple[list[dict], dict[str, int]]:
+        events, moved = [], {}
+        for folder in self.folders():
+            path = folder / "console.log"
+            key = str(path)
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            start = positions.get(key, 0)
+            if size < start:
+                start = 0
+            if size == start:
+                continue
+            state = self.files.setdefault(key, new_state(folder_start(folder)))
+            with open(path, "rb") as fh:
+                fh.seek(start)
+                data = fh.read(size - start)
+            end = data.rfind(b"\n") + 1
+            if not end:
+                continue
+            for line in data[:end].decode("utf-8", errors="replace").splitlines():
+                event = self._line(line, state)
+                if event:
+                    event["game"] = state["base"]
+                    events.append(event)
+            moved[key] = start + end
+        return events, moved
+
+    def _line(self, line: str, state: dict) -> dict | None:
+        stamp = STAMP.match(line)
+        if not stamp:
+            if state.get("vm") and (match := VM_CLASS.match(line)):
+                at, state["vm"] = state["vm"], None
+                return {"kind": "error", "at": at, "where": match[1]}
+            return None
+        clock = int(stamp[1]) * 3600 + int(stamp[2]) * 60 + int(stamp[3])
+        if state["clock"] is None:
+            base = time.localtime(state["base"])
+            state["start_clock"] = base.tm_hour * 3600 + base.tm_min * 60 + base.tm_sec
+            if clock < state["start_clock"] - 60:
+                state["day"] += 1
+        elif clock < state["clock"] - 3600:
+            state["day"] += 1
+        state["clock"] = clock
+        at = int(state["base"] - state["start_clock"] + clock + state["day"] * 86400)
+        pending = state["pending"]
+        if match := CONNECT.search(line):
+            ip = match[2].strip("[]")
+            pending[match[1]] = {"ip": ip, "guid": "", "at": at}
+            return {"kind": "join", "at": at, "text": f"{match[1]} connected", "ip": ip}
+        elif match := LEAVE.search(line):
+            return {"kind": "leave", "at": at, "text": f"{match[1]} disconnected", "ip": "", "name": match[1]}
+        elif " KILL " in line and (match := KILL.fullmatch(line.rstrip())):
+            return kill_event(match[2], match[3], at)
+        elif VM_ERROR.search(line):
+            state["vm"] = at
+        elif match := SCRIPT_ERROR.search(line):
+            return {"kind": "error", "at": at, "where": match[1]}
+        elif match := SIDE.match(line.rstrip()):
+            return {"kind": "side", "at": at, "text": f"{match[2]} joined {match[4]}", "ip": ""}
+        elif match := FPS.search(line):
+            return {"kind": "fps", "at": at, "fps": float(match[1])}
+        elif match := GUID.search(line):
+            if match[1] in pending:
+                pending[match[1]]["guid"] = match[2].lower()
+        elif match := IDENTITY.search(line):
+            name, identity = match[1], match[2].lower()
+            seen = pending.pop(name, None)
+            if seen and at - seen["at"] > PENDING_SECONDS:
+                seen = None
+            return {"kind": "identity", "identity": identity, "name": name, "at": at,
+                    "ip": seen["ip"] if seen else "", "guid": seen["guid"] if seen else ""}
+        return None
+
+
+def kill_event(relation, body, at):
+    victim = PERSON.match(body)
+    if not victim:
+        return None
+    parts = body.split(" was killed by ", 1)
+    metres, zone, where = distance(body), ZONE.search(body), VICTIM_AT.search(body)
+    event = {"at": at, "ip": "", "relation": relation, "victim": victim[2].lower(), "victim_name": victim[1],
+             "distance": metres,
+             "damage": damage_type(body), "zone": zone[1] if zone else None,
+             "victim_at": (float(where[1]), float(where[2])) if where else None,
+             "killer": None, "killer_name": None, "killer_at": None, "by_ai": False}
+    if len(parts) == 1:
+        event.update(kind="kill", text=f"{victim[1]} killed themselves", killer=event["victim"], killer_name=victim[1])
+        return event
+    killer = PERSON.match(parts[1])
+    event["by_ai"] = not killer and re.match(r"AI(\s|$)", parts[1]) is not None
+    name = killer[1] if killer else ("AI" if event["by_ai"] else parts[1].split(" (playerID")[0].split(" from ")[0])
+    kind = "teamkill" if relation == "TK" else "kill"
+    text = f"{name} {'teamkilled' if relation == 'TK' else 'killed'} {victim[1]}"
+    if metres:
+        text += f" ({metres:.0f} m)"
+    if event["damage"] and event["damage"] != "KINETIC":
+        text += f" · {event['damage'].lower()}"
+    if killer:
+        spot = KILLER_AT.search(parts[1])
+        event.update(killer=killer[2].lower(), killer_name=name,
+                     killer_at=(float(spot[1]), float(spot[2])) if spot else None)
+    event.update(kind=kind, text=text)
+    return event

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Guide · OYB Control{% endblock %}
+{% block body %}
+<div class="guide">
+<section class="card intro">
+  <p class="kicker">The OYB Control guide</p>
+  <h1>Welcome to OYB Control</h1>
+  <p>This is where we run the OYB servers: watching games as they happen, dealing with players, catching cheaters and keeping the servers healthy. Here you'll find everything you need to GM with it.</p>
+  <p>We built OYB Control ourselves so we have the freedom to add whatever we want, instead of being stuck with what someone else's tool gives us. Everything in it is here because we needed it. If you find yourself wishing it did something, tell an owner: it can be added.</p>
+  <p class="muted">New here? Start with <a href="/guide/getting-started">Getting started</a>, then read the rest in order or jump to what you need. The pictures come from a demo with made-up players, so the names won't match our servers.</p>
+</section>
+
+<div class="guide-cards">
+  {% for p in pages %}
+  <a class="card guide-card" href="/guide/{{ p.slug }}">
+    <span class="num">{{ "%02d"|format(loop.index) }}</span>
+    <h2>{{ p.title }}</h2>
+    <p>{{ p.summary }}</p>
+  </a>
+  {% endfor %}
+</div>
+</div>
+{% endblock %}
