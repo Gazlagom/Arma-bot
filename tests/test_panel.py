@@ -963,6 +963,19 @@ class RconClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await client.command("#players"), self.fake.players_text())
         self.assertEqual(await client.command("#kick 1"), "Player 1 kicked")
 
+    async def test_long_output_in_several_messages(self):
+        self.fake.direct = False
+        self.fake.pieces = 2
+        self.fake.players = [(str(n), f"Player{n}", f"{n:08d}-aaaa-bbbb-cccc-dddddddddddd") for n in range(1, 10)]
+        client = RconClient("127.0.0.1", self.port, "secret", timeout=2)
+        stray = []
+        client.on_message = stray.append
+        await client.connect()
+        self.addCleanup(client.close)
+        self.assertEqual(await client.command("#players"), self.fake.players_text())
+        await asyncio.sleep(0.5)
+        self.assertEqual([t for t in stray if not t.startswith("Logged In!")], [])
+
     async def test_unknown_command_is_an_error(self):
         self.fake.direct = False
         client = RconClient("127.0.0.1", self.port, "secret", timeout=2)
@@ -1108,6 +1121,24 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
     async def csrf(self, path="/"):
         html = await (await self.client.get(path)).text()
         return re.search(r'name="csrf" value="([^"]+)"', html).group(1)
+
+    async def test_admins_ban_but_cannot_unban_or_see_ips(self):
+        self.db.add_user("adm", auth.hash_password("adm-password"), "admin")
+        ban = self.db.add_ban(BUFORD, "Buford", "cheating", "boss", None)
+        await self.login("adm", "adm-password")
+        bans = await (await self.client.get("/bans")).text()
+        self.assertIn('action="/bans"', bans)
+        self.assertNotIn("/remove", bans)
+        token = await self.csrf("/bans")
+        response = await self.client.post(f"/bans/{ban}/remove", data={"csrf": token}, allow_redirects=False)
+        self.assertEqual(response.status, 403)
+        self.assertIsNone(self.db.ban(ban)["removed_at"])
+        server = await (await self.client.get("/server/server-1")).text()
+        self.assertNotIn("/power", server)
+        self.assertNotIn("upload-links", server)
+        player = await (await self.client.get(f"/player/{BUFORD}")).text()
+        self.assertNotIn("Connections", player)
+        self.assertIn("Kill log", player)
 
     async def test_a_blank_command_hides_its_button(self):
         await self.login("boss", "boss-password")
@@ -1485,6 +1516,19 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         await self.client.post("/discord/greeting", data={"csrf": token, "action": "publish",
             "doc": json.dumps({"enabled": True, "where": "dm", "channel_id": None, "text": "Hi {user}"})})
         self.assertEqual(json.loads(self.db.discord_doc("greeting")["published"])["where"], "dm")
+
+    async def test_a_ban_of_any_length(self):
+        await self.login("boss", "boss-password")
+        token = await self.csrf("/bans")
+        await self.client.post("/bans", data={"csrf": token, "player": BUFORD, "reason": "cooling off",
+                                              "duration": "custom", "amount": "45", "unit": "60"})
+        ban = self.db.active_ban(BUFORD)
+        self.assertAlmostEqual(ban["expires_at"] - ban["created_at"], 2700, delta=2)
+        self.assertIn("45 minutes", self.db.audit()[0]["detail"])
+        html = await (await self.client.post("/bans", data={"csrf": token, "player": person(9), "reason": "x",
+                                                            "duration": "custom", "amount": "0", "unit": "60"})).text()
+        self.assertIn("a custom one needs a number", html)
+        self.assertIsNone(self.db.active_ban(person(9)))
 
     async def test_ban_needs_a_known_player(self):
         await self.login("boss", "boss-password")

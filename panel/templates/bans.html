@@ -17,8 +17,12 @@
       <ul class="suggest" hidden></ul>
     </div>
     <label>Length
-      <select name="duration">{% for value, label in durations %}<option value="{{ value }}" {% if value == "86400" %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+      <select name="duration" data-ban-length>{% for value, label in durations %}<option value="{{ value }}" {% if value == "86400" %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
     </label>
+    <div class="ban-custom" data-ban-custom hidden>
+      <label>How long <input name="amount" type="number" min="1" inputmode="numeric" placeholder="e.g. 45"></label>
+      <label>&nbsp;<select name="unit">{% for value, label in ban_units %}<option value="{{ value }}">{{ label }}</option>{% endfor %}</select></label>
+    </div>
     <label>Reason <input name="reason" maxlength="200" required></label>
   </div>
   {% if can("ips") %}
@@ -34,15 +38,15 @@
     <a href="/bans{{ '' if show_old else '?all=1' }}">{{ "Active only" if show_old else "Show expired and removed" }}</a>
   </div>
   {% if bans %}
-  <div class="scroll"><table>
+  <div class="scroll"><table class="stack">
     <thead><tr><th>Player</th><th>Reason</th><th>Length</th><th>By</th><th class="wide">Servers</th><th></th></tr></thead>
     <tbody>
     {% for b in bans %}
     <tr>
       <td><a href="/player/{{ b.identity }}">{{ b.name or b.identity }}</a>{% if b.ips %} <span class="pill down" title="{{ b.ips|join(', ') if can('ips') else '' }}">IP</span>{% endif %}</td>
       <td class="wrap">{{ b.reason }}</td>
-      <td>{% if b.removed_at %}Removed by {{ b.removed_by }}{% else %}{{ b.expires_at|until }}{% endif %}</td>
-      <td title="{{ b.created_at|ts }}">{{ b.created_by }}</td>
+      <td data-label="Length">{% if b.removed_at %}Removed by {{ b.removed_by }}{% else %}{{ b.expires_at|until }}{% endif %}</td>
+      <td title="{{ b.created_at|ts }}" data-label="Banned by">{{ b.created_by }}</td>
       <td class="wide">
         {% for srv in servers if srv.configured %}
           {% set done = b.synced.get(srv.id, []) %}
@@ -54,7 +58,7 @@
         {% endfor %}
       </td>
       <td class="actions">
-        {% if can("ban") and not b.removed_at %}
+        {% if can("unban") and not b.removed_at %}
         <form method="post" action="/bans/{{ b.id }}/remove" data-confirm="Unban {{ b.name or b.identity }} on every server?">
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <button class="small">Unban</button>
