@@ -29,9 +29,9 @@ class FakeBM:
     async def ban_home(self):
         return {"id": "list-1", "name": "", "org": "777"}
 
-    async def player_ids(self, player):
+    async def player_info(self, player):
         self.lookups += 1
-        return self.players.get(player, [])
+        return self.players.get(player, []), f"Name of {player}"
 
     async def active_bans(self, ban_list):
         return [dict(b, bm_id=bm_id) for bm_id, b in self.bans.items()]
@@ -112,6 +112,27 @@ class BanSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bm.lookups, 2)
         self.assertEqual(self.sync.status["unmatched"], 1)
 
+    async def test_names_come_from_battlemetrics(self):
+        self.bm.bans["9"] = {"identities": [BUFORD], "reason": "Cheating", "expires": None, "by": "Blitz"}
+        await self.sync.round()
+        self.assertEqual(self.db.active_ban(BUFORD)["name"], "")
+        self.bm.bans["9"]["name"] = "OpXXFINITYYY"
+        await self.sync.round()
+        self.assertEqual(self.db.active_ban(BUFORD)["name"], "OpXXFINITYYY")
+        self.bm.bans["10"] = {"identities": [HAVOC], "reason": "TK", "expires": None, "by": "Blitz", "name": "Havoc"}
+        await self.sync.round()
+        self.assertEqual(self.db.active_ban(HAVOC)["name"], "Havoc")
+
+    async def test_older_bans_get_the_players_name(self):
+        self.bm.players = {"p1": [BUFORD]}
+        self.db.save_bm_player("p1", [BUFORD])
+        self.db.db.execute("DELETE FROM bm_player_names")
+        self.bm.bans["9"] = {"identities": [], "player": "p1", "reason": "TK", "expires": None, "by": "Blitz"}
+        await self.sync.round()
+        await self.sync.round()
+        self.assertEqual(self.db.active_ban(BUFORD)["name"], "Name of p1")
+        self.assertEqual(self.bm.lookups, 1)
+
     async def test_lookups_are_spread_over_rounds(self):
         for n in range(45):
             self.bm.bans[str(n)] = {"identities": [], "player": f"p{n}", "reason": "x", "expires": None, "by": "B"}
@@ -158,6 +179,7 @@ class ReadingTests(unittest.TestCase):
                           "relationships": {"player": {"data": {"type": "player", "id": "1198250383"}}}}]}
         ban = read_bans([page])[0]
         self.assertEqual((ban["identities"], ban["player"]), ([], "1198250383"))
+        self.assertEqual(ban["name"], "")
         self.assertEqual(ban["reason"], "Teamkilling Appeal @ discord.gg/oyb")
 
     def test_plain_reason(self):

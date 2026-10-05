@@ -59,6 +59,10 @@ CREATE TABLE IF NOT EXISTS bm_players (
     identities TEXT NOT NULL,
     at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS bm_player_names (
+    player TEXT PRIMARY KEY,
+    name TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS ban_sync (
     ban_id INTEGER NOT NULL REFERENCES bans(id),
     server_id TEXT NOT NULL,
@@ -367,13 +371,23 @@ class PanelDB:
     def mark_bm_removed(self, ban_id):
         self.write("UPDATE bm_bans SET removed = 1 WHERE ban_id = ?", ban_id)
 
-    def bm_player(self, player):
-        row = self.one("SELECT * FROM bm_players WHERE player = ?", player)
-        return {"identities": json.loads(row["identities"]), "at": row["at"]} if row else None
+    def name_bm_bans(self, bm_id, name):
+        """Bans that came in before their player's name was known."""
+        self.write("UPDATE bans SET name = ? WHERE name = '' AND id IN (SELECT ban_id FROM bm_bans WHERE bm_id = ?)",
+                   name, bm_id)
 
-    def save_bm_player(self, player, identities):
+    def bm_player(self, player):
+        row = self.one("SELECT p.*, n.name, n.player IS NOT NULL AS named FROM bm_players p"
+                       " LEFT JOIN bm_player_names n ON n.player = p.player WHERE p.player = ?", player)
+        if row is None:
+            return None
+        return {"identities": json.loads(row["identities"]), "name": row["name"] or "", "named": bool(row["named"]),
+                "at": row["at"]}
+
+    def save_bm_player(self, player, identities, name=""):
         self.write("INSERT OR REPLACE INTO bm_players (player, identities, at) VALUES (?, ?, ?)",
                    player, json.dumps(identities), now())
+        self.write("INSERT OR REPLACE INTO bm_player_names (player, name) VALUES (?, ?)", player, name)
 
     def bm_sources(self) -> dict[int, str]:
         return {r["ban_id"]: r["source"] for r in self.all("SELECT ban_id, source FROM bm_bans")}
