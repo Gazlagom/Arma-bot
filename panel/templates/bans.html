@@ -3,6 +3,12 @@
 {% block body %}
 <h1>Bans</h1>
 <p class="muted">One ban list for every server. A ban goes to all servers straight away, and to any that are offline as soon as they're back.</p>
+{% if bm %}
+<p class="{{ 'warn' if bm.ok == false else 'muted' }}">BattleMetrics:
+  {% if bm.ok is none %}first sync starting…
+  {% elif bm.ok %}in sync, checked {{ bm.at|ago }}.{% if bm.unmatched %} {{ bm.unmatched }} of its bans have no Reforger ID, so they can't be shown here.{% endif %}
+  {% else %}not syncing: {{ bm.error }}{% endif %}</p>
+{% endif %}
 
 {% if can("ban") %}
 <form class="card" method="post" action="/bans">
@@ -43,7 +49,7 @@
     <tbody>
     {% for b in bans %}
     <tr>
-      <td><a href="/player/{{ b.identity }}">{{ b.name or b.identity }}</a>{% if b.ips %} <span class="pill down" title="{{ b.ips|join(', ') if can('ips') else '' }}">IP</span>{% endif %}</td>
+      <td><a href="/player/{{ b.identity }}">{{ b.name or b.identity }}</a>{% if b.ips %} <span class="pill down" title="{{ b.ips|join(', ') if can('ips') else '' }}">IP</span>{% endif %}{% if b.bm == "battlemetrics" %} <span class="pill" title="Made on BattleMetrics">BM</span>{% endif %}</td>
       <td class="wrap">{{ b.reason }}</td>
       <td data-label="Length">{% if b.removed_at %}Removed by {{ b.removed_by }}{% else %}{{ b.expires_at|until }}{% endif %}</td>
       <td title="{{ b.created_at|ts }}" data-label="Banned by">{{ b.created_by }}</td>
@@ -58,6 +64,16 @@
         {% endfor %}
       </td>
       <td class="actions">
+        {% if can("ban") and b.created_by == user.username and not b.removed_at %}
+        <details class="edit-ban">
+          <summary class="button small ghost">Edit</summary>
+          <form method="post" action="/bans/{{ b.id }}/edit">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <textarea name="reason" rows="3" maxlength="200" required>{{ b.reason }}</textarea>
+            <button class="small">Save</button>
+          </form>
+        </details>
+        {% endif %}
         {% if can("unban") and not b.removed_at %}
         <form method="post" action="/bans/{{ b.id }}/remove" data-confirm="Unban {{ b.name or b.identity }} on every server?">
           <input type="hidden" name="csrf" value="{{ csrf }}">

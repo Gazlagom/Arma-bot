@@ -1140,6 +1140,25 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Connections", player)
         self.assertIn("Kill log", player)
 
+    async def test_only_whoever_banned_can_reword_it(self):
+        self.db.add_user("adm", auth.hash_password("adm-password"), "admin")
+        mine = self.db.add_ban(BUFORD, "Buford", "tk", "adm", None)
+        theirs = self.db.add_ban("11111111-2222-4333-8444-555555555555", "Other", "cheating", "boss", None)
+        await self.login("adm", "adm-password")
+        bans = await (await self.client.get("/bans")).text()
+        self.assertIn(f"/bans/{mine}/edit", bans)
+        self.assertNotIn(f"/bans/{theirs}/edit", bans)
+        token = await self.csrf("/bans")
+        await self.client.post(f"/bans/{mine}/edit", data={"csrf": token, "reason": "Teamkilled three times after a warning"})
+        self.assertEqual(self.db.ban(mine)["reason"], "Teamkilled three times after a warning")
+        self.assertEqual(self.db.audit()[0]["action"], "edit ban")
+        response = await self.client.post(f"/bans/{theirs}/edit", data={"csrf": token, "reason": "x"},
+                                          allow_redirects=False)
+        self.assertEqual(response.status, 403)
+        self.assertEqual(self.db.ban(theirs)["reason"], "cheating")
+        await self.client.post(f"/bans/{mine}/edit", data={"csrf": token, "reason": "  "})
+        self.assertEqual(self.db.ban(mine)["reason"], "Teamkilled three times after a warning")
+
     async def test_a_blank_command_hides_its_button(self):
         await self.login("boss", "boss-password")
         self.assertIn("Shut down (RCON)", await (await self.client.get("/server/server-1")).text())
@@ -1395,7 +1414,8 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         page = await (await self.client.get(link)).text()
         self.assertIn('data-kind="post"', page)
         self.assertIn("Give or take a role", page)
-        self.assertNotIn("Link Reforger account", page)
+        self.assertIn("Link Reforger account", page)
+        self.assertNotIn("Pick a faction", page)
         doc = welcome_doc.default_post()
         doc.update(title="Event night", sections=[{"heading": "", "text": "Friday 8pm"}])
         missing = await (await self.client.post(link, data={"csrf": token, "action": "publish", "doc": json.dumps(doc)})).text()
@@ -1437,6 +1457,17 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             "doc": json.dumps({"title": "", "text": "Get on!", "ping": True, "off": ["server-2"]})})
         doc = json.loads(self.db.discord_doc("matchping")["published"])
         self.assertEqual((doc["off"], doc["text"], doc["ping"]), (["server-2"], "Get on!", True))
+
+    async def test_weekly_top_three_wording(self):
+        await self.login("boss", "boss-password")
+        page = await (await self.client.get("/discord/weekly")).text()
+        self.assertIn('data-kind="weekly"', page)
+        self.assertIn("WEEKLY LEADERBOARD — RESET", page)
+        token = await self.csrf("/discord/weekly")
+        await self.client.post("/discord/weekly", data={"csrf": token, "action": "publish",
+            "doc": json.dumps({"on": True, "title": "Kings of {week}", "intro": "", "outro": "GG all"})})
+        doc = json.loads(self.db.discord_doc("weekly")["published"])
+        self.assertEqual(doc, {"on": True, "title": "Kings of {week}", "intro": "", "outro": "GG all"})
 
     async def test_channels_and_roles(self):
         await self.login("boss", "boss-password")
@@ -1782,6 +1813,24 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         part = await (await self.client.get("/server/server-1/feed.part")).text()
         self.assertIn("Something from the server", part)
         self.assertNotIn("Logged In!", part)
+
+    async def test_feed_filter_reaches_past_a_busy_minute(self):
+        self.db.add_feed("server-1", "sus", "Hubcaps got 7 kills in 30 seconds", at=1000)
+        self.db.log("boss", "kick", "server-1", "Hubcaps", "camping")
+        for n in range(250):
+            self.db.add_feed("server-1", "kill", f"Someone killed Player{n} (50 m)")
+        await self.login("boss", "boss-password")
+        everything = await (await self.client.get("/server/server-1/feed.part")).text()
+        self.assertNotIn("7 kills in 30 seconds", everything)
+        sus = await (await self.client.get("/server/server-1/feed.part?show=sus")).text()
+        self.assertIn("7 kills in 30 seconds", sus)
+        self.assertNotIn("Player1 ", sus)
+        admin = await (await self.client.get("/server/server-1/feed.part?show=admin")).text()
+        self.assertIn("boss: kick Hubcaps (camping)", admin)
+        self.assertNotIn("Player1 ", admin)
+        rcon = await (await self.client.get("/server/server-1/feed.part?show=rcon")).text()
+        self.assertIn("Server 1 is online", rcon)
+        self.assertNotIn("Player1 ", rcon)
 
     async def test_console_is_audited(self):
         await self.login("boss", "boss-password")

@@ -2,6 +2,9 @@ import sqlite3
 import time
 from pathlib import Path
 
+FEED_SHOWS = {"joins": ("join", "leave", "side"), "kills": ("kill", "teamkill"), "sus": ("sus",),
+              "rcon": ("rcon", "server"), "admin": ()}
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
@@ -42,6 +45,14 @@ CREATE TABLE IF NOT EXISTS bans (
     removed_by TEXT,
     removed_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS bm_bans (
+    ban_id INTEGER PRIMARY KEY REFERENCES bans(id),
+    bm_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    reason_sent TEXT NOT NULL DEFAULT '',
+    removed INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS bm_bans_bm ON bm_bans(bm_id);
 CREATE TABLE IF NOT EXISTS ban_sync (
     ban_id INTEGER NOT NULL REFERENCES bans(id),
     server_id TEXT NOT NULL,
@@ -97,6 +108,7 @@ CREATE TABLE IF NOT EXISTS feed (
     ip TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS feed_at ON feed(server, at);
+CREATE INDEX IF NOT EXISTS feed_kind ON feed(server, kind, at);
 CREATE TABLE IF NOT EXISTS ip_bans (
     ban_id INTEGER NOT NULL REFERENCES bans(id),
     ip TEXT NOT NULL,
@@ -307,9 +319,50 @@ class PanelDB:
         return self.one("SELECT * FROM bans WHERE identity = ? AND removed_at IS NULL"
                         " AND (expires_at IS NULL OR expires_at > ?) ORDER BY id DESC", identity, now())
 
+    def set_ban_reason(self, ban_id: int, reason: str):
+        self.write("UPDATE bans SET reason = ? WHERE id = ?", reason, ban_id)
+
     def remove_ban(self, ban_id: int, removed_by: str):
         self.write("UPDATE bans SET removed_by = ?, removed_at = ? WHERE id = ? AND removed_at IS NULL",
                    removed_by, now(), ban_id)
+
+    # BattleMetrics: which panel ban is which BattleMetrics ban
+
+    def link_bm(self, ban_id, bm_id, source):
+        self.write("INSERT OR REPLACE INTO bm_bans (ban_id, bm_id, source, reason_sent)"
+                   " SELECT id, ?, ?, reason FROM bans WHERE id = ?", bm_id, source, ban_id)
+
+    def bm_ban(self, ban_id):
+        return self.one("SELECT * FROM bm_bans WHERE ban_id = ?", ban_id)
+
+    def bm_link(self, bm_id):
+        return self.one("SELECT * FROM bm_bans WHERE bm_id = ?", bm_id)
+
+    def bm_links_active(self):
+        return self.all("SELECT m.ban_id, m.bm_id, b.expires_at FROM bm_bans m JOIN bans b ON b.id = m.ban_id"
+                        " WHERE m.removed = 0 AND b.removed_at IS NULL")
+
+    def bans_not_on_bm(self):
+        return self.all("SELECT * FROM bans WHERE removed_at IS NULL AND (expires_at IS NULL OR expires_at > ?)"
+                        " AND id NOT IN (SELECT ban_id FROM bm_bans) ORDER BY id", now())
+
+    def bm_reasons_changed(self):
+        return self.all("SELECT m.ban_id, m.bm_id, b.reason FROM bm_bans m JOIN bans b ON b.id = m.ban_id"
+                        " WHERE m.removed = 0 AND b.removed_at IS NULL AND b.reason != m.reason_sent")
+
+    def mark_bm_reason_sent(self, ban_id):
+        self.write("UPDATE bm_bans SET reason_sent = (SELECT reason FROM bans WHERE id = ?) WHERE ban_id = ?",
+                   ban_id, ban_id)
+
+    def bm_unbans_to_send(self):
+        return self.all("SELECT m.ban_id, m.bm_id FROM bm_bans m JOIN bans b ON b.id = m.ban_id"
+                        " WHERE m.removed = 0 AND b.removed_at IS NOT NULL")
+
+    def mark_bm_removed(self, ban_id):
+        self.write("UPDATE bm_bans SET removed = 1 WHERE ban_id = ?", ban_id)
+
+    def bm_sources(self) -> dict[int, str]:
+        return {r["ban_id"]: r["source"] for r in self.all("SELECT ban_id, source FROM bm_bans")}
 
     def add_ip_bans(self, ban_id: int, ips):
         self.db.executemany("INSERT OR IGNORE INTO ip_bans (ban_id, ip) VALUES (?, ?)", [(ban_id, ip) for ip in ips])
@@ -485,16 +538,24 @@ class PanelDB:
     def update_feed(self, row, text, at):
         self.write("UPDATE feed SET text = ?, at = ? WHERE id = ?", text[:2000], at, row)
 
-    def feed(self, server, limit=200):
-        """Log events, RCON messages and admin actions for one server, newest first."""
-        return self.all(
-            "SELECT at, kind, text, ip FROM ("
-            " SELECT id, at, kind, text, ip, 0 AS src FROM feed WHERE server = ?"
-            " UNION ALL SELECT id, at, 'admin' AS kind,"
-            "  username || ': ' || action || CASE WHEN target != '' THEN ' ' || target ELSE '' END"
-            "  || CASE WHEN detail != '' THEN ' (' || detail || ')' ELSE '' END, '' AS ip, 1 AS src"
-            "  FROM audit WHERE server = ?"
-            ") ORDER BY at DESC, src, id DESC LIMIT ?", server, server, limit)
+    def feed(self, server, limit=200, show="all"):
+        """Log events, RCON messages and admin actions for one server, newest first.
+        show picks one of FEED_SHOWS, so a rare kind isn't buried under the last 200 kills."""
+        kinds = FEED_SHOWS.get(show)
+        events = ("SELECT id, at, kind, text, ip, 0 AS src FROM feed WHERE server = ?"
+                  + (f" AND kind IN ({', '.join('?' * len(kinds))})" if kinds else ""))
+        actions = ("SELECT id, at, 'admin' AS kind,"
+                   " username || ': ' || action || CASE WHEN target != '' THEN ' ' || target ELSE '' END"
+                   " || CASE WHEN detail != '' THEN ' (' || detail || ')' ELSE '' END AS text, '' AS ip, 1 AS src"
+                   " FROM audit WHERE server = ?")
+        if show == "admin":
+            parts, args = [actions], [server]
+        elif kinds:
+            parts, args = [events], [server, *kinds]
+        else:
+            parts, args = [events, actions], [server, server]
+        return self.all(f"SELECT at, kind, text, ip FROM ({' UNION ALL '.join(parts)})"
+                        " ORDER BY at DESC, src, id DESC LIMIT ?", *args, limit)
 
     def prune_feed(self, days=7, sus_days=180):
         self.write("DELETE FROM feed WHERE at < ? AND (kind != 'sus' OR at < ?)",

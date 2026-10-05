@@ -413,6 +413,11 @@ details.controls[open] summary::after { content: " ▴"; }
 .control-list .muted { font-size: .85rem; flex-basis: 100%; }
 
 .players-table td.actions { white-space: nowrap; }
+details.edit-ban { display: inline-block; vertical-align: top; }
+details.edit-ban summary { list-style: none; }
+details.edit-ban summary::-webkit-details-marker { display: none; }
+details.edit-ban[open] { display: block; margin-bottom: 8px; }
+details.edit-ban form { display: grid; gap: 6px; margin-top: 8px; }
 .players-table td.actions form { display: inline-block; margin: 0; }
 .dc-jump { display: none; }
 
@@ -427,7 +432,7 @@ details.controls[open] summary::after { content: " ▴"; }
   .summary .stat b { font-size: 1.15rem; }
   .summary .stat span { font-size: .65rem; }
   .summary .minor { display: none; }
-  .players-table .num-col { display: none; }
+  .players-table .num-col, .players-table .wide { display: none; }
   table.stack thead { display: none; }
   table.stack, table.stack tbody, table.stack tr, table.stack td { display: block; width: 100%; }
   table.stack tr { padding: 10px 0; border-bottom: 1px solid var(--line-soft); }

@@ -21,6 +21,7 @@ from .connections import LogReader, folder_start
 from .db import PanelDB, now
 from .oyb_stats import OybStats
 from .rcon import RconError
+from .battlemetrics import BanSync
 from .servers import POWER_RCON, POWER_SERVICE, ServerManager, clean, valid_identity
 
 log = logging.getLogger("panel.web")
@@ -63,6 +64,7 @@ THROTTLE = web.AppKey("throttle", auth.LoginThrottle)
 FLASH = web.AppKey("flash", dict)
 JINJA = web.AppKey("jinja", jinja2.Environment)
 STATS = web.AppKey("stats", OybStats)
+BM = web.AppKey("battlemetrics", object)
 USER = web.RequestKey("user", object) if hasattr(web, "RequestKey") else "user"
 CSRF = web.RequestKey("csrf", str) if hasattr(web, "RequestKey") else "csrf"
 
@@ -714,7 +716,8 @@ async def summary_part(request):
 
 async def feed_part(request):
     state = server_or_404(request, request.match_info["id"])
-    return render(request, "_feed.html", s=server_view(state), feed=request.app[DB].feed(state.config.id))
+    show = request.query.get("show", "all")
+    return render(request, "_feed.html", s=server_view(state), feed=request.app[DB].feed(state.config.id, show=show), show=show)
 
 
 def alt_flags(request, state):
@@ -789,10 +792,13 @@ async def power(request):
 async def bans_page(request):
     db = request.app[DB]
     show_old = request.query.get("all") == "1"
-    rows = [dict(b, synced=db.synced(b["id"]), ips=db.ban_ips(b["id"])) for b in db.bans(include_old=show_old)]
+    on_bm = db.bm_sources()
+    rows = [dict(b, synced=db.synced(b["id"]), ips=db.ban_ips(b["id"]), bm=on_bm.get(b["id"]))
+            for b in db.bans(include_old=show_old)]
     prefill = {k: clean(request.query.get(k, ""), 64) for k in ("identity", "name")}
+    sync = request.app[BM]
     return render(request, "bans.html", bans=rows, show_old=show_old, durations=DURATIONS, ban_units=BAN_UNITS,
-                  prefill=prefill, error="")
+                  prefill=prefill, error="", bm=sync.status if sync else None)
 
 
 async def add_ban(request):
@@ -853,6 +859,27 @@ async def add_ban(request):
         extra = (f" IP banned {known} address{'es' if known != 1 else ''}." if known
                  else " No IPs known for them yet, so only this account.")
     flash(request, f"Banned {len(targets)} account{'s' if len(targets) != 1 else ''}: {'; '.join(lines)}.{extra}")
+    raise web.HTTPFound("/bans")
+
+
+async def edit_ban(request):
+    """Only whoever made a ban can reword its reason, while it's still in force."""
+    require(request, "ban")
+    db = request.app[DB]
+    ban = db.ban(int(request.match_info["ban_id"]))
+    by = request[USER]["username"]
+    if ban is None or ban["removed_at"] or (ban["expires_at"] and ban["expires_at"] <= now()):
+        raise web.HTTPFound("/bans")
+    if ban["created_by"] != by:
+        raise web.HTTPForbidden(text="Only the admin who made this ban can change its reason.")
+    reason = clean((await request.post()).get("reason", ""))
+    if not reason:
+        flash(request, "The reason can't be empty.", "error")
+        raise web.HTTPFound("/bans")
+    if reason != ban["reason"]:
+        db.set_ban_reason(ban["id"], reason)
+        audit(request, "edit ban", target=ban["name"] or ban["identity"], detail=f"{ban['reason']} → {reason}")
+    flash(request, f"Reason for {ban['name'] or ban['identity']} updated.")
     raise web.HTTPFound("/bans")
 
 
@@ -1018,7 +1045,7 @@ async def add_note(request):
 # Discord: what the bot posts, edited here and published to it
 
 DISCORD_PAGES = (("welcome", "Start here message"), ("serverinfo", "Server info & rules"), ("names", "Server names"),
-                 ("factions", "Factions"), ("matchping", "Match alerts"), ("greeting", "Join greeting"), ("bans", "Ban messages"),
+                 ("factions", "Factions"), ("matchping", "Match alerts"), ("weekly", "Weekly top 3"), ("greeting", "Join greeting"), ("bans", "Ban messages"),
                  ("posts", "Posts"), ("links", "Link requests"), ("channels", "Channels & roles"))
 
 
@@ -1252,6 +1279,7 @@ DISCORD_DOCS = {"welcome": (welcome_doc.default_welcome, welcome_doc.check_welco
                 "bans": (welcome_doc.default_bans, welcome_doc.check_bans),
                 "post": (welcome_doc.default_post, welcome_doc.check_post),
                 "matchping": (welcome_doc.default_matchping, welcome_doc.check_matchping),
+                "weekly": (welcome_doc.default_weekly, welcome_doc.check_weekly),
                 "channels": (welcome_doc.default_channels, welcome_doc.check_channels),
                 "factions": (welcome_doc.default_factions, welcome_doc.check_factions)}
 
@@ -1380,6 +1408,8 @@ def create_app(config: PanelConfig, db: PanelDB | None = None, manager: ServerMa
     app[THROTTLE] = auth.LoginThrottle()
     app[FLASH] = {}
     app[STATS] = OybStats(config.oyb_data)
+    app[BM] = BanSync(app[DB], config.battlemetrics_token, config.battlemetrics_ban_list) \
+        if config.battlemetrics_token else None
     env = jinja2.Environment(loader=jinja2.FileSystemLoader(HERE / "templates"),
                              autoescape=True, trim_blocks=True, lstrip_blocks=True)
     env.filters.update(ts=_ts, ago=_ago, clock=_clock, hms=_hms, until=_until, span=_span, gb=memory.gb)
@@ -1388,7 +1418,11 @@ def create_app(config: PanelConfig, db: PanelDB | None = None, manager: ServerMa
     if start_manager:
         async def lifecycle(app):
             app[MANAGER].start()
+            if app[BM]:
+                app[BM].start()
             yield
+            if app[BM]:
+                await app[BM].stop()
             await app[MANAGER].stop()
             app[DB].close()
         app.cleanup_ctx.append(lifecycle)
@@ -1424,6 +1458,7 @@ def create_app(config: PanelConfig, db: PanelDB | None = None, manager: ServerMa
     app.router.add_get("/bans", bans_page)
     app.router.add_post("/bans", add_ban)
     app.router.add_post("/bans/{ban_id:\\d+}/remove", remove_ban)
+    app.router.add_post("/bans/{ban_id:\\d+}/edit", edit_ban)
     app.router.add_get("/players", players_page)
     app.router.add_get("/players/unusual", unusual_page)
     app.router.add_get("/players/search.json", player_search)

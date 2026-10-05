@@ -302,7 +302,7 @@ def check_bans(raw):
     return doc, problems
 
 
-POST_TYPES = {key: TYPES[key] for key in ("role", "pick", "url")}
+POST_TYPES = {key: TYPES[key] for key in ("link", "progress", "role", "pick", "url")}
 
 
 def default_post():
@@ -312,7 +312,7 @@ def default_post():
 
 def check_post(raw):
     """A post is a message like Start here, with only the buttons that make
-    sense anywhere: roles, a pick-one group, and web links."""
+    sense anywhere: linking, progress, roles, a pick-one group, and web links."""
     doc, problems = check_welcome(raw)
     for button in doc["buttons"]:
         if button["type"] not in POST_TYPES:
@@ -338,6 +338,19 @@ def check_matchping(raw):
     return doc, []
 
 
+def default_weekly():
+    """Blank wording keeps the bot's own."""
+    return {"on": True, "title": "", "intro": "", "outro": ""}
+
+
+def check_weekly(raw):
+    if not isinstance(raw, dict):
+        return default_weekly(), ["That couldn't be read. Reload and try again."]
+    text = lambda key, limit: str(raw.get(key, "") or "").replace("\r\n", "\n").strip()[:limit]
+    return {"on": bool(raw.get("on")), "title": text("title", 200), "intro": text("intro", 1500),
+            "outro": text("outro", 1500)}, []
+
+
 # (setting, what it is) for the Channels & roles page, in the order shown.
 CHANNEL_SETTINGS = (
     ("ONBOARDING_CHANNEL_ID", "Start here message"),
@@ -345,6 +358,7 @@ CHANNEL_SETTINGS = (
     ("LIVE_BOARD_CHANNEL_ID", "Live match board"),
     ("GAME_LEADERBOARD_CHANNEL_ID", "Match results"),
     ("LEADERBOARD_CHANNEL_ID", "Weekly leaderboard"),
+    ("WEEKLY_WINNERS_CHANNEL_ID", "Weekly top 3 when the board resets (blank: the weekly leaderboard channel)"),
     ("FACTION_CHANNEL_ID", "Faction picker and match-notification buttons"),
     ("RANK_LOG_CHANNEL_ID", "Rank promotions"),
 )
