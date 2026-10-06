@@ -415,6 +415,7 @@ details.controls[open] summary::after { content: " ▴"; }
 .control-list .muted { font-size: .85rem; flex-basis: 100%; }
 
 .players-table td.actions { white-space: nowrap; }
+.player-search { flex: 1 1 160px; max-width: 280px; margin: 0 0 12px auto; padding: 6px 10px; }
 .srv-tags { display: grid; grid-template-columns: repeat(2, max-content); gap: 4px; }
 .srv-tags .pill { margin: 0; }
 .bans-table td:first-child { overflow-wrap: anywhere; min-width: 150px; }
@@ -428,7 +429,9 @@ details.edit-ban { display: inline-block; vertical-align: top; }
 details.edit-ban summary { list-style: none; }
 details.edit-ban summary::-webkit-details-marker { display: none; }
 details.edit-ban[open] { display: block; margin-bottom: 8px; }
-details.edit-ban form { display: grid; gap: 6px; margin-top: 8px; }
+details.edit-ban form { display: grid; gap: 6px; margin-top: 8px; text-align: left; min-width: 260px; }
+details.edit-ban .ban-custom { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+details.edit-ban .ban-custom[hidden] { display: none; }
 .players-table td.actions form { display: inline-block; margin: 0; }
 .dc-jump { display: none; }
 
