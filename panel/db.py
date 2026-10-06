@@ -3,7 +3,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-FEED_SHOWS = {"joins": ("join", "leave", "side"), "kills": ("kill", "teamkill"), "sus": ("sus",),
+FEED_SHOWS = {"joins": ("join", "leave", "side"), "kills": ("kill", "teamkill"), "tks": ("teamkill",), "sus": ("sus",),
               "rcon": ("rcon", "server"), "admin": ()}
 
 SCHEMA = """
@@ -16,6 +16,11 @@ CREATE TABLE IF NOT EXISTS users (
     must_change INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     last_login INTEGER
+);
+CREATE TABLE IF NOT EXISTS user_grants (
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    grant_key TEXT NOT NULL,
+    PRIMARY KEY (user_id, grant_key)
 );
 CREATE TABLE IF NOT EXISTS sessions (
     token_hash TEXT PRIMARY KEY,
@@ -125,6 +130,7 @@ CREATE TABLE IF NOT EXISTS ip_bans (
     PRIMARY KEY (ban_id, ip)
 );
 CREATE INDEX IF NOT EXISTS ip_bans_ip ON ip_bans(ip);
+CREATE INDEX IF NOT EXISTS bans_identity ON bans(identity);
 CREATE TABLE IF NOT EXISTS log_positions (
     server TEXT NOT NULL,
     path TEXT NOT NULL,
@@ -278,6 +284,21 @@ class PanelDB:
 
     def user_by_name(self, username: str):
         return self.one("SELECT * FROM users WHERE username = ?", username)
+
+    def grants(self, user_id) -> set[str]:
+        return {r["grant_key"] for r in self.all("SELECT grant_key FROM user_grants WHERE user_id = ?", user_id)}
+
+    def all_grants(self) -> dict[int, set[str]]:
+        found = {}
+        for r in self.all("SELECT user_id, grant_key FROM user_grants"):
+            found.setdefault(r["user_id"], set()).add(r["grant_key"])
+        return found
+
+    def set_grants(self, user_id, grants):
+        self.db.execute("DELETE FROM user_grants WHERE user_id = ?", (user_id,))
+        self.db.executemany("INSERT INTO user_grants (user_id, grant_key) VALUES (?, ?)",
+                            [(user_id, g) for g in sorted(grants)])
+        self.db.commit()
 
     def users(self):
         return self.all("SELECT * FROM users ORDER BY username COLLATE NOCASE")
@@ -608,11 +629,24 @@ class PanelDB:
 
     def alt_summary(self, identities) -> dict[str, dict]:
         """For the live list: how many other accounts share an address, and whether one is banned."""
+        identities = list(dict.fromkeys(identities))
         result = {}
-        for identity in identities:
-            rows = self.alts(identity)
-            if rows:
-                result[identity] = {"count": len(rows), "banned": [r["name"] for r in rows if r["banned"]]}
+        for start in range(0, len(identities), 500):
+            chunk = identities[start:start + 500]
+            marks = ",".join("?" * len(chunk))
+            rows = self.all(
+                "SELECT mine.identity AS me, other.identity, COALESCE(p.name, MAX(other.name)) AS name,"
+                " EXISTS (SELECT 1 FROM bans b WHERE b.identity = other.identity AND b.removed_at IS NULL"
+                "   AND (b.expires_at IS NULL OR b.expires_at > ?)) AS banned"
+                " FROM connections mine JOIN connections other ON other.ip = mine.ip AND other.identity != mine.identity"
+                " LEFT JOIN players p ON p.identity = other.identity"
+                f" WHERE mine.identity IN ({marks}) GROUP BY mine.identity, other.identity"
+                " ORDER BY MAX(other.last_seen) DESC", now(), *chunk)
+            for r in rows:
+                entry = result.setdefault(r["me"], {"count": 0, "banned": []})
+                entry["count"] += 1
+                if r["banned"]:
+                    entry["banned"].append(r["name"])
         return result
 
     def search_ip(self, text, limit=100):

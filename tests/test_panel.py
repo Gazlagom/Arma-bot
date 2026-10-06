@@ -329,6 +329,12 @@ class OybStatsTests(unittest.TestCase):
         self.assertEqual((stats["discord"], stats["name"]), (42, "Sgt Havoc"))
         self.assertNotIn("xp", stats)
 
+    def test_playtimes_for_a_list(self):
+        unknown = "00000000-0000-4000-8000-000000000000"
+        self.assertEqual(self.stats.playtimes([HAVOC, unknown, HAVOC]), {HAVOC: 10_000})
+        self.assertEqual(self.stats.playtimes([HAVOC]), {HAVOC: 10_000})
+        self.assertEqual(OybStats("/nonexistent").playtimes([HAVOC]), {})
+
     def test_unknown_and_missing(self):
         self.assertIsNone(self.stats.player("00000000-0000-4000-8000-000000000000"))
         self.assertIsNone(OybStats("/nonexistent").player(HAVOC))
@@ -1122,6 +1128,54 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         html = await (await self.client.get(path)).text()
         return re.search(r'name="csrf" value="([^"]+)"', html).group(1)
 
+    async def test_owners_can_give_one_person_one_discord_page(self):
+        self.db.add_user("mo", auth.hash_password("mo-password-1"), "moderator")
+        mo = self.db.user_by_name("mo")["id"]
+        await self.login("boss", "boss-password")
+        token = await self.csrf("/users")
+        self.assertIn(f'href="/users/{mo}/access"', await (await self.client.get("/users")).text())
+        page = await (await self.client.get(f"/users/{mo}/access")).text()
+        self.assertIn('value="discord:welcome"', page)
+        self.assertNotIn('value="kick"', page)
+        await self.client.post(f"/users/{mo}", data={"csrf": token, "action": "grants",
+                                                     "grant": ["discord:welcome", "kick", "made-up"]})
+        self.assertEqual(self.db.grants(mo), {"discord:welcome"})
+        self.assertEqual(self.db.audit()[0]["action"], "changed access")
+        await self.client.post("/logout", data={"csrf": token})
+        await self.login("mo", "mo-password-1")
+        home = await (await self.client.get("/")).text()
+        self.assertIn('href="/discord"', home)
+        self.assertNotIn('href="/website"', home)
+        response = await self.client.get("/discord", allow_redirects=False)
+        self.assertEqual(response.headers["Location"], "/discord/welcome")
+        welcome = await (await self.client.get("/discord/welcome")).text()
+        self.assertIn('href="/discord/welcome"', welcome)
+        self.assertNotIn('href="/discord/posts"', welcome)
+        self.assertEqual((await self.client.get("/discord/posts")).status, 403)
+        self.assertEqual((await self.client.get("/discord/channels")).status, 403)
+        self.assertEqual((await self.client.get("/website")).status, 403)
+        guide = await (await self.client.get("/guide")).text()
+        self.assertIn("/guide/discord-messages", guide)
+        self.assertNotIn("/guide/admins", guide)
+        self.assertEqual((await self.client.get("/users")).status, 403)
+
+    async def test_extra_access_on_top_of_a_role(self):
+        self.db.add_user("adm", auth.hash_password("adm-password"), "admin")
+        adm = self.db.user_by_name("adm")["id"]
+        self.db.set_grants(adm, {"ips", "discord"})
+        await self.login("adm", "adm-password")
+        player = await (await self.client.get(f"/player/{BUFORD}")).text()
+        self.assertIn("Connections", player)
+        self.assertEqual((await self.client.get("/discord/posts")).status, 200)
+        guide = await (await self.client.get("/guide/players")).text()
+        self.assertIn("IP address", guide)
+        await self.client.post("/logout", data={"csrf": await self.csrf("/")})
+        await self.login("boss", "boss-password")
+        token = await self.csrf("/users")
+        await self.client.post(f"/users/{adm}", data={"csrf": token, "action": "grants",
+                                                      "grant": ["discord", "discord:welcome", "ban"]})
+        self.assertEqual(self.db.grants(adm), {"discord"})
+
     async def test_admins_ban_but_cannot_unban_or_see_ips(self):
         self.db.add_user("adm", auth.hash_password("adm-password"), "admin")
         ban = self.db.add_ban(BUFORD, "Buford", "cheating", "boss", None)
@@ -1852,6 +1906,10 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         sus = await (await self.client.get("/server/server-1/feed.part?show=sus")).text()
         self.assertIn("7 kills in 30 seconds", sus)
         self.assertNotIn("Player1 ", sus)
+        self.db.add_feed("server-1", "teamkill", "Tru_Aegis teamkilled THE_Mann97 (2 m)", at=900)
+        tks = await (await self.client.get("/server/server-1/feed.part?show=tks")).text()
+        self.assertIn("Tru_Aegis teamkilled", tks)
+        self.assertNotIn("Player1 ", tks)
         admin = await (await self.client.get("/server/server-1/feed.part?show=admin")).text()
         self.assertIn("boss: kick Hubcaps (camping)", admin)
         self.assertNotIn("Player1 ", admin)

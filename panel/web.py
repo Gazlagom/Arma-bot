@@ -67,6 +67,7 @@ STATS = web.AppKey("stats", OybStats)
 BM = web.AppKey("battlemetrics", object)
 USER = web.RequestKey("user", object) if hasattr(web, "RequestKey") else "user"
 CSRF = web.RequestKey("csrf", str) if hasattr(web, "RequestKey") else "csrf"
+GRANTS = web.RequestKey("grants", set) if hasattr(web, "RequestKey") else "grants"
 
 
 def _ts(value):
@@ -125,7 +126,7 @@ def render(request, template, **context):
         settle_minutes=request.app[MANAGER].settle // 60,
         user=user,
         csrf=request.get(CSRF, ""),
-        can=(lambda perm: bool(user) and auth.can(user["role"], perm)),
+        can=(lambda perm: bool(user) and allowed(request, perm)),
         servers=request.app[CONFIG].servers,
         path=request.path,
         flashes=request.app[FLASH].pop(user["id"], []) if user and not template.startswith("_") else [],
@@ -138,8 +139,12 @@ def flash(request, message, kind="ok"):
     request.app[FLASH].setdefault(request[USER]["id"], []).append((kind, message))
 
 
+def allowed(request, permission):
+    return auth.allows(request[USER]["role"], request.get(GRANTS, set()), permission)
+
+
 def require(request, permission):
-    if not auth.can(request[USER]["role"], permission):
+    if not allowed(request, permission):
         raise web.HTTPForbidden(text="You do not have permission for that.")
 
 
@@ -188,11 +193,16 @@ SECURITY_HEADERS = {
 
 @web.middleware
 async def security(request, handler):
+    started = time.monotonic()
     try:
         response = await handler(request)
     except web.HTTPException as exc:
         exc.headers.update(SECURITY_HEADERS)
         raise
+    finally:
+        took = time.monotonic() - started
+        if took > 1:
+            log.warning("slow page: %s took %.1fs", request.path, took)
     response.headers.update(SECURITY_HEADERS)
     return response
 
@@ -231,6 +241,7 @@ async def session(request, handler):
     db = request.app[DB]
     user, csrf = auth.session_user(db, request.cookies.get(COOKIE))
     request[USER], request[CSRF] = user, csrf
+    request[GRANTS] = db.grants(user["id"]) if user else set()
     if request.path.startswith(PUBLIC):
         return await handler(request)
     if user is None:
@@ -368,7 +379,7 @@ GUIDE = [
 
 def guide_pages(request):
     return [{"slug": slug, "title": title, "summary": summary} for slug, title, summary, need in GUIDE
-            if need is None or auth.can(request[USER]["role"], need)]
+            if need is None or allowed(request, need)]
 
 
 async def guide(request):
@@ -400,6 +411,7 @@ async def server_page(request):
     recent = db.audit(server=state.config.id, limit=15)
     return render(request, "server.html", s=server_view(state), actions=actions, labels=POWER_LABELS,
                   recent=recent, health=health_data(db, state), alts=alt_flags(request, state),
+                  played=played(request, [p["identity"] for p in state.players]),
                   feed=db.feed(state.config.id), **history(request, state))
 
 
@@ -419,7 +431,7 @@ def history(request, state):
             started = folder_start(folders[-1])
             if since <= started < until:
                 live = {"folder": folders[-1].name, "started": started}
-    links = request.app[DB].upload_links(state.config.id) if auth.can(request[USER]["role"], "ips") else []
+    links = request.app[DB].upload_links(state.config.id) if allowed(request, "ips") else []
     return {"games": games, "live": live, "day": day, "today": time.strftime("%Y-%m-%d"), "upload_links": links}
 
 
@@ -654,7 +666,7 @@ def site_page(request, preview=False):
 
 
 async def website_page(request):
-    require(request, "discord")
+    require(request, "website")
     return website_form(request, site_doc(request), [])
 
 
@@ -666,7 +678,7 @@ def website_form(request, doc, problems):
 
 
 async def website_save(request):
-    require(request, "discord")
+    require(request, "website")
     form = await request.post()
     raw = {key: form.get(key, "") for key in ("name", "tagline", "about", "discord")}
     raw["servers"] = {s.id: {"show": f"show_{s.id}" in form, "name": form.get(f"name_{s.id}", ""),
@@ -682,7 +694,7 @@ async def website_save(request):
 
 
 async def website_preview(request):
-    require(request, "discord")
+    require(request, "website")
     return site_page(request, preview=True)
 
 
@@ -720,15 +732,20 @@ async def feed_part(request):
     return render(request, "_feed.html", s=server_view(state), feed=request.app[DB].feed(state.config.id, show=show), show=show)
 
 
+def played(request, identities):
+    return request.app[STATS].playtimes([i for i in identities if i])
+
+
 def alt_flags(request, state):
-    if not auth.can(request[USER]["role"], "ips"):
+    if not allowed(request, "ips"):
         return {}
     return request.app[DB].alt_summary([p["identity"] for p in state.players if p["identity"]])
 
 
 async def players_part(request):
     state = server_or_404(request, request.match_info["id"])
-    return render(request, "_players.html", s=server_view(state), alts=alt_flags(request, state))
+    return render(request, "_players.html", s=server_view(state), alts=alt_flags(request, state),
+                  played=played(request, [p["identity"] for p in state.players]))
 
 
 async def memory_part(request):
@@ -851,7 +868,7 @@ async def add_ban(request):
     length = length_text(seconds) if seconds else "Permanent"
     name = name or (db.player(identity) or {"name": ""})["name"]
     by = request[USER]["username"]
-    ip_ban = form.get("ip") == "1" and auth.can(request[USER]["role"], "ips")
+    ip_ban = form.get("ip") == "1" and allowed(request, "ips")
     targets = [(identity, name, reason)]
     if ip_ban:
         ips = [c["ip"] for c in db.ips(identity)]
@@ -961,13 +978,13 @@ async def unusual_page(request):
 async def players_page(request):
     q = clean(request.query.get("q", ""), 64)
     rows = [dict(r) for r in request.app[DB].search_players(q, limit=50)]
-    if q and re.fullmatch(r"[0-9a-fA-F.:]{3,}", q) and auth.can(request[USER]["role"], "ips"):
+    if q and re.fullmatch(r"[0-9a-fA-F.:]{3,}", q) and allowed(request, "ips"):
         seen = {r["identity"] for r in rows}
         rows += [dict(r) for r in request.app[DB].search_ip(q) if r["identity"] not in seen]
     if q:
         seen = {r["identity"] for r in rows}
         rows += [dict(r, last_seen=0, last_server="") for r in request.app[STATS].search(q) if r["identity"] not in seen]
-    return render(request, "players.html", q=q, rows=rows)
+    return render(request, "players.html", q=q, rows=rows, played=played(request, [r["identity"] for r in rows]))
 
 
 KILL_LOGS = (("tk_by", "Teamkills they did"), ("tk_on", "Who teamkilled them"), ("all", "All their kills and deaths"))
@@ -1040,9 +1057,9 @@ async def player_page(request):
                 break
     return render(request, "player.html", identity=identity, player=db.player(identity),
                   stats=stats, stats_here=oyb.available, linked_via=linked_via,
-                  ips=db.ips(identity) if auth.can(request[USER]["role"], "ips") else [],
-                  banned_ips=db.banned_ips() if auth.can(request[USER]["role"], "ips") else set(),
-                  alts=db.alts(identity) if auth.can(request[USER]["role"], "ips") else [],
+                  ips=db.ips(identity) if allowed(request, "ips") else [],
+                  banned_ips=db.banned_ips() if allowed(request, "ips") else set(),
+                  alts=db.alts(identity) if allowed(request, "ips") else [],
                   names=db.player_names(identity), notes=db.notes(identity), bans=bans,
                   incidents=db.incidents_for(identity), kills=kill_log(request, identity),
                   kill_logs=KILL_LOGS, kill_periods=KILL_PERIODS,
@@ -1090,7 +1107,8 @@ def discord_state(request, key, defaults, check):
 
 async def discord_home(request):
     require(request, "discord")
-    raise web.HTTPFound("/discord/welcome")
+    first = next(key for key, _ in DISCORD_PAGES if allowed(request, f"discord:{key}"))
+    raise web.HTTPFound(f"/discord/{first}")
 
 
 def text_ids(value):
@@ -1116,8 +1134,8 @@ def discord_context(key, **extra):
 
 
 async def discord_page(request):
-    require(request, "discord")
     key = request.match_info["page"]
+    require(request, f"discord:{key}")
     if key == "posts":
         return posts_page(request)
     if key == "links":
@@ -1135,8 +1153,8 @@ async def discord_page(request):
 
 
 async def discord_save(request):
-    require(request, "discord")
     key = request.match_info["page"]
+    require(request, f"discord:{key}")
     if key == "links":
         return await link_action(request)
     if key not in DISCORD_DOCS or key == "post":
@@ -1202,7 +1220,7 @@ def posts_page(request):
 
 
 async def new_post(request):
-    require(request, "discord")
+    require(request, "discord:posts")
     post_id = secrets.token_hex(4)
     request.app[DB].save_discord_draft(f"post:{post_id}", json.dumps(welcome_doc.default_post()), request[USER]["username"])
     audit(request, "new post")
@@ -1222,7 +1240,7 @@ def post_context(post_id):
 
 
 async def post_page(request):
-    require(request, "discord")
+    require(request, "discord:posts")
     post_id, key = post_key(request)
     defaults, check = DISCORD_DOCS["post"]
     state = discord_state(request, key, defaults, check)
@@ -1233,7 +1251,7 @@ async def post_page(request):
 
 
 async def post_save(request):
-    require(request, "discord")
+    require(request, "discord:posts")
     post_id, key = post_key(request)
     form = await request.post()
     if form.get("action") == "delete":
@@ -1351,9 +1369,28 @@ async def audit_page(request):
 
 # users
 
+def users_view(request, created=None):
+    db = request.app[DB]
+    return render(request, "users.html", rows=db.users(), roles=auth.ROLES, created=created, grants=db.all_grants())
+
+
+def grant_keys():
+    return {key for key, _ in auth.GRANTS} | {f"discord:{key}" for key, _ in DISCORD_PAGES}
+
+
 async def users_page(request):
     require(request, "users")
-    return render(request, "users.html", rows=request.app[DB].users(), roles=auth.ROLES, created=None)
+    return users_view(request)
+
+
+async def access_page(request):
+    require(request, "users")
+    db = request.app[DB]
+    target = db.user(int(request.match_info["user_id"]))
+    if target is None or target["role"] == "owner":
+        raise web.HTTPFound("/users")
+    return render(request, "user_access.html", target=target, mine=db.grants(target["id"]), grant_list=auth.GRANTS,
+                  discord_pages=DISCORD_PAGES, role_can=auth.can)
 
 
 async def add_user(request):
@@ -1373,8 +1410,7 @@ async def add_user(request):
     password = auth.temp_password()
     db.add_user(username, auth.hash_password(password), role, must_change=True)
     audit(request, "created account", target=username, detail=role)
-    return render(request, "users.html", rows=db.users(), roles=auth.ROLES,
-                  created={"username": username, "password": password})
+    return users_view(request, created={"username": username, "password": password})
 
 
 async def change_user(request):
@@ -1397,6 +1433,17 @@ async def change_user(request):
             db.write("UPDATE users SET role = ? WHERE id = ?", role, target["id"])
             audit(request, "changed role", target=target["username"], detail=f"{target['role']} → {role}")
             flash(request, f"{target['username']} is now {role}.")
+    elif action == "grants":
+        chosen = set(form.getall("grant", [])) & grant_keys()
+        chosen = {g for g in chosen if not auth.can(target["role"], g)}
+        if "discord" in chosen:
+            chosen = {g for g in chosen if not g.startswith("discord:")}
+        before = db.grants(target["id"])
+        db.set_grants(target["id"], chosen)
+        if chosen != before:
+            audit(request, "changed access", target=target["username"],
+                  detail=", ".join(sorted(chosen)) or "role only")
+        flash(request, f"{target['username']}'s extra access saved.")
     elif action in ("disable", "enable"):
         if action == "disable" and (target["id"] == request[USER]["id"] or last_owner):
             flash(request, "You can't disable yourself or the last owner.", "error")
@@ -1412,8 +1459,7 @@ async def change_user(request):
                  auth.hash_password(password), target["id"])
         auth.end_all_sessions(db, target["id"])
         audit(request, "reset password", target=target["username"])
-        return render(request, "users.html", rows=db.users(), roles=auth.ROLES,
-                      created={"username": target["username"], "password": password})
+        return users_view(request, created={"username": target["username"], "password": password})
     else:
         raise web.HTTPBadRequest(text="Unknown action.")
     raise web.HTTPFound("/users")
@@ -1496,6 +1542,7 @@ def create_app(config: PanelConfig, db: PanelDB | None = None, manager: ServerMa
     app.router.add_get("/users", users_page)
     app.router.add_post("/users", add_user)
     app.router.add_post("/users/{user_id:\\d+}", change_user)
+    app.router.add_get("/users/{user_id:\\d+}/access", access_page)
     app.router.add_static("/static/", HERE / "static")
     app.router.add_static("/brand/", BRAND)
     return app
