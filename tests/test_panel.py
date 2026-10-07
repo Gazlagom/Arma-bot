@@ -693,6 +693,33 @@ class SuspicionTests(unittest.TestCase):
         self.assertEqual(len(self.flags(log, same_second=2)), 1)
 
 
+class MassTeamkillTests(unittest.TestCase):
+    def setUp(self):
+        self.db = PanelDB(":memory:")
+        self.addCleanup(self.db.close)
+        self.manager = ServerManager(PanelConfig(servers=[ServerConfig("one", "Server 1")]), self.db, alerts=FakeAlerts())
+
+    def teamkills(self, *victims):
+        at = now()
+        return [{"kind": "teamkill", "at": at + n, "killer": BUFORD, "killer_name": "Buford", "victim_name": v}
+                for n, v in enumerate(victims)]
+
+    def test_queued_for_the_staff_channel(self):
+        self.manager.mass_teamkills(self.manager.states["one"], self.teamkills("A", "B", "C"))
+        alert = self.db.staff_alerts()[0]
+        self.assertEqual(alert["title"], "Mass teamkill on Server 1")
+        self.assertIn("**Buford** teamkilled 3 players in 2 seconds: A, B, C.", alert["text"])
+        self.assertEqual(self.db.feed("one")[0]["kind"], "sus")
+
+    def test_owners_settings_apply(self):
+        self.db.publish_discord_doc("staffalerts", json.dumps({"on": True, "count": 4, "seconds": 60}), "gaz")
+        self.manager.mass_teamkills(self.manager.states["one"], self.teamkills("A", "B", "C"))
+        self.assertEqual(self.db.staff_alerts(), [])
+        self.db.publish_discord_doc("staffalerts", json.dumps({"on": False, "count": 2, "seconds": 60}), "gaz")
+        self.manager.mass_teamkills(self.manager.states["one"], self.teamkills("A", "B", "C", "D"))
+        self.assertEqual(self.db.staff_alerts(), [])
+
+
 class IncidentTests(unittest.TestCase):
     def setUp(self):
         self.db = PanelDB(":memory:")
@@ -1146,11 +1173,12 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         home = await (await self.client.get("/")).text()
         self.assertIn('href="/discord"', home)
         self.assertNotIn('href="/website"', home)
-        response = await self.client.get("/discord", allow_redirects=False)
-        self.assertEqual(response.headers["Location"], "/discord/welcome")
+        home = await (await self.client.get("/discord")).text()
+        self.assertIn('href="/discord/welcome"', home)
+        self.assertNotIn('href="/discord/posts"', home)
+        self.assertNotIn("Setup", home)
         welcome = await (await self.client.get("/discord/welcome")).text()
-        self.assertIn('href="/discord/welcome"', welcome)
-        self.assertNotIn('href="/discord/posts"', welcome)
+        self.assertIn('href="/discord"', welcome)
         self.assertEqual((await self.client.get("/discord/posts")).status, 403)
         self.assertEqual((await self.client.get("/discord/channels")).status, 403)
         self.assertEqual((await self.client.get("/website")).status, 403)
@@ -1561,6 +1589,27 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         doc = json.loads(self.db.discord_doc("matchping")["published"])
         self.assertEqual((doc["off"], doc["text"], doc["ping"]), (["server-2"], "Get on!", True))
 
+    async def test_discord_home_groups_every_page(self):
+        await self.login("boss", "boss-password")
+        home = await (await self.client.get("/discord")).text()
+        for key in ("welcome", "greeting", "serverinfo", "factions", "matchping", "weekly", "bans", "staffalerts",
+                    "posts", "links", "channels", "names"):
+            self.assertIn(f'href="/discord/{key}"', home)
+        self.assertIn("What new members see", home)
+        self.assertIn("Bot&#39;s default", home)
+
+    async def test_staff_alert_settings_page(self):
+        self.db.add_staff_alert("server-1", now(), "Mass teamkill on Server 1", "**Rook** teamkilled 3 players")
+        await self.login("boss", "boss-password")
+        page = await (await self.client.get("/discord/staffalerts")).text()
+        self.assertIn('data-kind="staffalerts"', page)
+        self.assertIn("Rook teamkilled 3 players", page)
+        token = await self.csrf("/discord/staffalerts")
+        await self.client.post("/discord/staffalerts", data={"csrf": token, "action": "publish",
+            "doc": json.dumps({"on": True, "count": "4", "seconds": "90", "ping_role": "Admin"})})
+        doc = json.loads(self.db.discord_doc("staffalerts")["published"])
+        self.assertEqual(doc, {"on": True, "count": 4, "seconds": 90, "ping_role": "Admin"})
+
     async def test_weekly_top_three_wording(self):
         await self.login("boss", "boss-password")
         page = await (await self.client.get("/discord/weekly")).text()
@@ -1919,6 +1968,39 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             html = await (await self.client.get("/", headers={"Host": "oybgaming.com"})).text()
             self.assertIn("<li>Have fun</li>", html)
             self.assertNotIn("No cheating", html)
+
+    async def test_admins_in_game(self):
+        await self.login("boss", "boss-password")
+        cards = await (await self.client.get("/cards.part")).text()
+        self.assertIn("No admin on", cards)
+        token = await self.csrf(f"/player/{HAVOC}")
+        await self.client.post(f"/player/{HAVOC}/staff", data={"csrf": token, "on": "1"})
+        self.assertEqual(self.db.staff_ids(), {HAVOC})
+        await self.manager.refresh_players(self.manager.state("server-1"))
+        cards = await (await self.client.get("/cards.part")).text()
+        self.assertIn("Admin on: Sgt Havoc", cards)
+        players = await (await self.client.get("/server/server-1/players.part")).text()
+        self.assertIn('<span class="pill on">Admin</span>', players)
+        await self.client.post(f"/player/{HAVOC}/staff", data={"csrf": token, "on": "0"})
+        self.assertEqual(self.db.staff_ids(), set())
+
+    async def test_server_config_admins_count(self):
+        with tempfile.TemporaryDirectory() as root:
+            logs = Path(root, "AReforgerMaster", "logs")
+            logs.mkdir(parents=True)
+            Path(root, "Configs").mkdir()
+            Path(root, "Configs", "serverconfig.json").write_text(json.dumps(
+                {"game": {"admins": [HAVOC.upper(), "76561198000000000"]}}))
+            self.manager.state("server-1").config.log_dir = str(logs)
+            self.assertEqual(self.manager.config_admins(), {HAVOC})
+
+    async def test_only_owners_mark_admins(self):
+        self.db.add_user("adm", auth.hash_password("adm-password"), "admin")
+        await self.login("adm", "adm-password")
+        token = await self.csrf(f"/player/{HAVOC}")
+        response = await self.client.post(f"/player/{HAVOC}/staff", data={"csrf": token, "on": "1"},
+                                          allow_redirects=False)
+        self.assertEqual(response.status, 403)
 
     async def test_live_player_search_box(self):
         await self.login("boss", "boss-password")

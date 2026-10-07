@@ -155,6 +155,19 @@ CREATE TABLE IF NOT EXISTS link_actions (
     by TEXT NOT NULL,
     at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS staff (
+    identity TEXT PRIMARY KEY,
+    added_by TEXT NOT NULL,
+    at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS staff_alerts (
+    id INTEGER PRIMARY KEY,
+    server TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS upload_links (
     id INTEGER PRIMARY KEY,
     token_hash TEXT NOT NULL UNIQUE,
@@ -690,6 +703,26 @@ class PanelDB:
 
     def link_actions(self, limit=30):
         return self.all("SELECT * FROM link_actions ORDER BY id DESC LIMIT ?", limit)
+
+    # staff: players who are OYB admins in game
+
+    def staff_ids(self) -> set[str]:
+        return {r["identity"] for r in self.all("SELECT identity FROM staff")}
+
+    def set_staff(self, identity, by, on=True):
+        if on:
+            self.write("INSERT OR IGNORE INTO staff (identity, added_by, at) VALUES (?, ?, ?)", identity, by, now())
+        else:
+            self.write("DELETE FROM staff WHERE identity = ?", identity)
+
+    # alerts the bot posts to the staff channel
+
+    def add_staff_alert(self, server, at, title, text) -> int:
+        return self.write("INSERT INTO staff_alerts (server, at, title, text, created) VALUES (?, ?, ?, ?, ?)",
+                          server, at, title, text, now())
+
+    def staff_alerts(self, limit=20):
+        return self.all("SELECT * FROM staff_alerts ORDER BY id DESC LIMIT ?", limit)
 
     # upload links
 

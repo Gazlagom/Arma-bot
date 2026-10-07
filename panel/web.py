@@ -343,6 +343,7 @@ def server_view(state):
         "check": state.check,
         "ping_ms": state.ping_ms,
         "fps": state.fps if now() - state.fps_at < 180 else None,
+        "admins": state.admins if state.online else [],
     }
 
 
@@ -1088,7 +1089,23 @@ async def player_page(request):
                   names=db.player_names(identity), notes=db.notes(identity), bans=bans,
                   incidents=db.incidents_for(identity), kills=kill_log(request, identity),
                   kill_logs=KILL_LOGS, kill_periods=KILL_PERIODS,
-                  active=db.active_ban(identity), durations=DURATIONS)
+                  active=db.active_ban(identity), durations=DURATIONS,
+                  staff=identity in db.staff_ids(), config_staff=identity in request.app[MANAGER].config_admins())
+
+
+async def set_staff(request):
+    require(request, "users")
+    identity = request.match_info["identity"].lower()
+    if not valid_identity(identity):
+        raise web.HTTPNotFound(text="No such player.")
+    on = (await request.post()).get("on") == "1"
+    db = request.app[DB]
+    db.set_staff(identity, request[USER]["username"], on)
+    name = (db.player(identity) or {"name": identity})["name"]
+    audit(request, "marked staff" if on else "unmarked staff", target=name)
+    flash(request, f"{name} {'is now marked as an admin' if on else 'is no longer marked as an admin'}. "
+                   "Server pages show it within a few seconds.")
+    raise web.HTTPFound(f"/player/{identity}")
 
 
 async def add_note(request):
@@ -1107,7 +1124,7 @@ async def add_note(request):
 # Discord: what the bot posts, edited here and published to it
 
 DISCORD_PAGES = (("welcome", "Start here message"), ("serverinfo", "Server info & rules"), ("names", "Server names"),
-                 ("factions", "Factions"), ("matchping", "Match alerts"), ("weekly", "Weekly top 3"), ("greeting", "Join greeting"), ("bans", "Ban messages"),
+                 ("factions", "Factions"), ("matchping", "Match alerts"), ("weekly", "Weekly top 3"), ("staffalerts", "Staff alerts"), ("greeting", "Join greeting"), ("bans", "Ban messages"),
                  ("posts", "Posts"), ("links", "Link requests"), ("channels", "Channels & roles"))
 
 
@@ -1130,10 +1147,65 @@ def discord_state(request, key, defaults, check):
     return {"row": row, "doc": check(doc)[0], "draft": draft is not None, "live": published is not None}
 
 
+# The Discord home page: every page grouped by what it's for, with one line on what it does.
+DISCORD_GROUPS = (
+    ("What new members see", (
+        ("welcome", "The Start here message: rules to accept, linking their game account, picking a faction."),
+        ("greeting", "A hello when someone joins, in a channel or by DM."),
+        ("serverinfo", "The #servers card: each server's settings, and the in-game rules (also shown on the website)."),
+        ("factions", "The faction roles members pick: names, colours and emojis."),
+    )),
+    ("What the bot posts by itself", (
+        ("matchping", "\"Match started\" alerts, and who gets pinged for which server."),
+        ("weekly", "The top 3 when the weekly leaderboard resets on Monday."),
+        ("bans", "The DM a banned player gets, and the card in their ban ticket."),
+        ("staffalerts", "Alerts to staff when someone teamkills several players in a short time."),
+    )),
+    ("Posting yourself", (
+        ("posts", "Your own messages: announcements, events, FAQs, with buttons if you want."),
+    )),
+    ("Staff jobs", (
+        ("links", "Approve or refuse members linking their game account; unlink people."),
+    )),
+    ("Setup", (
+        ("channels", "Which channel each of the above goes in, and the member roles. Start here when setting up."),
+        ("names", "What each game server is called in Discord."),
+    )),
+)
+
+
+def discord_status(request, key, report):
+    """One short status for the Discord home page."""
+    db = request.app[DB]
+    if key == "posts":
+        live = [r for r in db.all("SELECT published FROM discord_docs WHERE key LIKE 'post:%' AND published IS NOT NULL")
+                if not json.loads(r["published"]).get("deleted")]
+        return ("on", f"{len(live)} up") if live else ("", "None yet")
+    if key == "links":
+        waiting = len((report.get("link_requests") or {}).get("pending", []))
+        return ("gold", f"{waiting} waiting") if waiting else ("on", "Nothing waiting")
+    row = db.discord_doc(key)
+    reported = report.get(key) or {}
+    if row and row["published"] and reported.get("version") == row["version"] and reported.get("problems"):
+        return ("down", "Problem")
+    if row and row["draft"]:
+        return ("gold", "Draft not published")
+    if row and row["published"]:
+        return ("on", "Live")
+    return ("", "Bot's default")
+
+
 async def discord_home(request):
     require(request, "discord")
-    first = next(key for key, _ in DISCORD_PAGES if allowed(request, f"discord:{key}"))
-    raise web.HTTPFound(f"/discord/{first}")
+    report = bridge(request)
+    labels = dict(DISCORD_PAGES)
+    groups = []
+    for title, pages in DISCORD_GROUPS:
+        items = [{"key": key, "label": labels[key], "about": about, "status": discord_status(request, key, report)}
+                 for key, about in pages if allowed(request, f"discord:{key}")]
+        if items:
+            groups.append({"title": title, "pages": items})
+    return render(request, "discord_home.html", groups=groups, bridge=report)
 
 
 def text_ids(value):
@@ -1148,11 +1220,15 @@ def text_ids(value):
     return value
 
 
+DISCORD_ABOUT = {key: about for _, pages in DISCORD_GROUPS for key, about in pages}
+
+
 def discord_context(key, **extra):
     base = {"types": welcome_doc.TYPES, "placeholders": welcome_doc.PLACEHOLDERS,
             "ban_placeholders": welcome_doc.BAN_PLACEHOLDERS, "dm_title": welcome_doc.DM_TITLE,
             "dm_text": welcome_doc.DM_TEXT, "ticket_title": welcome_doc.TICKET_TITLE,
             "pages": DISCORD_PAGES, "page": key, "kind": key, "action_url": f"/discord/{key}", "heading": None,
+            "about": DISCORD_ABOUT.get("posts" if key == "post" else key, ""),
             "text_ids": text_ids, "channel_settings": welcome_doc.CHANNEL_SETTINGS,
             "role_settings": welcome_doc.ROLE_SETTINGS}
     return {**base, **extra}
@@ -1173,8 +1249,9 @@ async def discord_page(request):
     if key == "bans" and not state["live"] and not state["draft"] and report.get("ban_settings"):
         # Start from what the bot is using now (its .env), not blank.
         state["doc"] = check(report["ban_settings"])[0]
+    recent = request.app[DB].staff_alerts(10) if key == "staffalerts" else []
     return render(request, f"discord_{key}.html", bridge=report, default_doc=defaults(), problems=[], **state,
-                  **discord_context(key))
+                  recent=recent, **discord_context(key))
 
 
 async def discord_save(request):
@@ -1343,6 +1420,7 @@ DISCORD_DOCS = {"welcome": (welcome_doc.default_welcome, welcome_doc.check_welco
                 "post": (welcome_doc.default_post, welcome_doc.check_post),
                 "matchping": (welcome_doc.default_matchping, welcome_doc.check_matchping),
                 "weekly": (welcome_doc.default_weekly, welcome_doc.check_weekly),
+                "staffalerts": (welcome_doc.default_staffalerts, welcome_doc.check_staffalerts),
                 "channels": (welcome_doc.default_channels, welcome_doc.check_channels),
                 "factions": (welcome_doc.default_factions, welcome_doc.check_factions)}
 
@@ -1555,6 +1633,7 @@ def create_app(config: PanelConfig, db: PanelDB | None = None, manager: ServerMa
     app.router.add_get("/players/search.json", player_search)
     app.router.add_get("/player/{identity}", player_page)
     app.router.add_post("/player/{identity}/notes", add_note)
+    app.router.add_post("/player/{identity}/staff", set_staff)
     app.router.add_get("/discord", discord_home)
     app.router.add_post("/discord/posts/new", new_post)
     app.router.add_get("/discord/posts/{post}", post_page)

@@ -218,7 +218,7 @@ body.has-full::after { content: ""; position: fixed; inset: 0; background: rgba(
   .pane { height: 380px; }
 }
 
-.summary { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+.summary { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
 .summary .stat { background: var(--panel); border-color: var(--line); }
 .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 18px; }
 .tabs a { font-family: var(--display); text-transform: uppercase; letter-spacing: .06em; font-size: 1.05rem;
@@ -283,7 +283,15 @@ form.inline input[type=date] { display: inline-block; width: auto; margin: 0; pa
 }
 
 /* Discord editors */
-.dc-shell { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 24px; align-items: start; }
+.dc-shell { display: block; }
+.dc-about { margin: -4px 0 16px; max-width: 760px; }
+.dc-group { margin: 22px 0 6px; }
+.dc-group h2 { font-size: 1rem; color: var(--muted); margin-bottom: 10px; }
+.dc-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.dc-item { display: block; color: var(--ink); text-decoration: none; padding: 14px 16px; margin: 0; }
+.dc-item:hover { border-color: var(--gold); }
+.dc-item b { font-family: var(--display); letter-spacing: .05em; text-transform: uppercase; color: var(--gold); }
+.dc-item p { margin: 6px 0 0; font-size: .9rem; }
 .dc-tabs { display: flex; flex-direction: column; gap: 2px; position: sticky; top: 16px; }
 .dc-tabs a, .dc-tabs .soon { padding: 8px 12px; border-left: 2px solid var(--line); color: var(--muted); text-decoration: none; }
 .dc-tabs a.on, .dc-tabs a:hover { color: var(--ink); border-left-color: var(--gold); background: var(--panel); }
@@ -415,6 +423,8 @@ details.controls[open] summary::after { content: " ▴"; }
 .control-list .muted { font-size: .85rem; flex-basis: 100%; }
 
 .players-table td.actions { white-space: nowrap; }
+.admins-on { color: var(--khaki); margin: 6px 0; font-size: .9rem; }
+.no-admin { color: var(--red); margin: 6px 0; font-size: .9rem; }
 .players-table .wide { display: none; }
 .player-search { flex: 1 1 160px; max-width: 280px; margin: 0 0 12px auto; padding: 6px 10px; }
 .srv-tags { display: grid; grid-template-columns: repeat(2, max-content); gap: 4px; }
