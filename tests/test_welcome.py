@@ -213,6 +213,22 @@ class WelcomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(staff.said), 1)
         self.assertIn("11", staff.said[0])
 
+    async def test_a_new_channel_is_used_without_a_restart(self):
+        os.environ["SERVERS_CHANNEL_ID"] = "500"
+        welcome = Welcome(self.bot)
+        await welcome.tick()
+        with patch("bot.discord.channel_moves.move", new=AsyncMock()) as move:
+            await welcome.tick()
+            move.assert_not_awaited()
+            self.panel.publish_discord_doc("channels", json.dumps({"channels": {"SERVERS_CHANNEL_ID": "600"}}), "gaz")
+            await welcome.tick()
+            self.assertEqual(os.environ["SERVERS_CHANNEL_ID"], "600")
+            move.assert_awaited_once_with(self.bot, self.guild, "SERVERS_CHANNEL_ID")
+            self.panel.publish_discord_doc("channels", json.dumps({"channels": {}}), "gaz")
+            await welcome.tick()
+        self.assertEqual(os.environ["SERVERS_CHANNEL_ID"], "500")
+        self.assertEqual(move.await_count, 2)
+
     async def test_staff_alerts_wait_for_a_channel(self):
         self.panel.add_staff_alert("eu1", int(time.time()), "Mass teamkill", "x")
         with patch.dict(os.environ, {"STAFF_ALERT_CHANNEL_ID": ""}):

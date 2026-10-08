@@ -1628,15 +1628,42 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             Path(data, "panel_bridge.json").write_text(json.dumps({"updated": now(),
                 "roles": [{"id": "9", "name": "OYB Member", "colour": "#fff", "problem": None}],
                 "channels": [{"id": "300", "name": "start-here", "category": "WELCOME"}],
-                "settings_now": {"ONBOARDING_CHANNEL_ID": "300", "MEMBER_ROLE_NAME": "OYB Member"}}))
+                "settings_now": {"LIVE_BOARD_CHANNEL_ID": "300", "MEMBER_ROLE_NAME": "OYB Member"}}))
             page = await (await self.client.get("/discord/channels")).text()
             self.assertIn("Now: #start-here", page)
             token = await self.csrf("/discord/channels")
             await self.client.post("/discord/channels", data={"csrf": token, "action": "publish",
                 "doc": json.dumps({"channels": {"LIVE_BOARD_CHANNEL_ID": "300"}, "roles": {}})})
-            page = await (await self.client.get("/discord/channels")).text()
-        self.assertIn("take effect when the bot next restarts", page)
         self.assertEqual(json.loads(self.db.discord_doc("channels")["published"])["channels"], {"LIVE_BOARD_CHANNEL_ID": "300"})
+
+    async def test_each_page_picks_its_own_channel(self):
+        await self.login("boss", "boss-password")
+        with tempfile.TemporaryDirectory() as data:
+            self.config.oyb_data = data
+            Path(data, "panel_bridge.json").write_text(json.dumps({"updated": now(),
+                "channels": [{"id": "300", "name": "servers", "category": "INFO"},
+                             {"id": "301", "name": "staff", "category": "STAFF"}],
+                "settings_now": {"SERVERS_CHANNEL_ID": "300"}}))
+            page = await (await self.client.get("/discord/serverinfo")).text()
+            self.assertIn('action="/discord/serverinfo/channel"', page)
+            self.assertIn("In #servers now.", page)
+            token = await self.csrf("/discord/serverinfo")
+            self.db.save_discord_draft("channels", json.dumps({"channels": {}, "roles": {"MEMBER_ROLE_NAME": "X"}}), "gaz")
+            await self.client.post("/discord/serverinfo/channel", data={"csrf": token, "channel": "301"})
+            await self.client.post("/discord/staffalerts/channel", data={"csrf": token, "channel": "301"})
+            row = self.db.discord_doc("channels")
+            self.assertEqual(json.loads(row["published"])["channels"],
+                             {"SERVERS_CHANNEL_ID": "301", "STAFF_ALERT_CHANNEL_ID": "301"})
+            self.assertIsNotNone(row["draft"])
+            # Publishing the Channels & roles page keeps what the other pages picked.
+            await self.client.post("/discord/channels", data={"csrf": token, "action": "publish",
+                "doc": json.dumps({"channels": {"LIVE_BOARD_CHANNEL_ID": "300"}, "roles": {}})})
+            self.assertEqual(json.loads(self.db.discord_doc("channels")["published"])["channels"],
+                             {"SERVERS_CHANNEL_ID": "301", "STAFF_ALERT_CHANNEL_ID": "301", "LIVE_BOARD_CHANNEL_ID": "300"})
+            await self.client.post("/discord/serverinfo/channel", data={"csrf": token, "channel": ""})
+            self.assertNotIn("SERVERS_CHANNEL_ID", json.loads(self.db.discord_doc("channels")["published"])["channels"])
+            response = await self.client.post("/discord/names/channel", data={"csrf": token, "channel": "301"})
+            self.assertEqual(response.status, 404)
 
     async def test_link_requests(self):
         await self.login("boss", "boss-password")
