@@ -371,9 +371,10 @@ GUIDE = [
     ("banning", "Banning", "Bans on every server, IP bans and unbanning.", None),
     ("history", "Past games", "Pulling up any day's games, and downloading or uploading logs.", None),
     ("health", "Health and memory", "Uptime, crashes, and when a server needs a full restart.", None),
-    ("discord", "Discord", "What gets posted to the staff channel, and linked accounts.", None),
+    ("discord", "Discord", "What gets posted for staff, teamkill alerts, and linked accounts.", None),
     ("console-audit", "Console and audit log", "Raw RCON commands, and the record of who did what.", "audit"),
-    ("discord-messages", "Discord messages", "Start here, server info and rules, names, ban messages, posts and the greeting.", "discord"),
+    ("discord-messages", "Discord messages", "Every Discord page: what the bot posts, where, and staff alerts.", "discord"),
+    ("website", "The website", "The public site: its words, servers and rules.", "website"),
     ("admins", "Admin accounts", "Making accounts, roles and password resets.", "users"),
 ]
 
@@ -1124,7 +1125,7 @@ async def add_note(request):
 # Discord: what the bot posts, edited here and published to it
 
 DISCORD_PAGES = (("welcome", "Start here message"), ("serverinfo", "Server info & rules"), ("names", "Server names"),
-                 ("factions", "Factions"), ("matchping", "Match alerts"), ("weekly", "Weekly top 3"), ("staffalerts", "Staff alerts"), ("greeting", "Join greeting"), ("bans", "Ban messages"),
+                 ("factions", "Factions"), ("matchping", "Match alerts"), ("weekly", "Weekly top 3"), ("staffalerts", "Staff alerts"), ("feedback", "Feedback"), ("greeting", "Join greeting"), ("bans", "Ban messages"),
                  ("posts", "Posts"), ("links", "Link requests"), ("channels", "Channels & roles"))
 
 
@@ -1136,6 +1137,9 @@ def bridge(request):
     except (OSError, ValueError):
         return {}
     data["age"] = now() - int(data.get("updated", 0))
+    if not isinstance(data.get("channels"), list):
+        # An older bot wrote how the Channels page went under the same name as the channel list.
+        data["channels"] = []
     return data
 
 
@@ -1166,6 +1170,7 @@ DISCORD_GROUPS = (
     )),
     ("Staff jobs", (
         ("links", "Approve or refuse members linking their game account; unlink people."),
+        ("feedback", "Where members' feedback goes, the thank-you they get, and who's pinged."),
     )),
     ("Setup", (
         ("channels", "Channels for the boards and logs with no page of their own, and the member roles. Every other page picks its own channel at the top."),
@@ -1185,7 +1190,8 @@ def discord_status(request, key, report):
         waiting = len((report.get("link_requests") or {}).get("pending", []))
         return ("gold", f"{waiting} waiting") if waiting else ("on", "Nothing waiting")
     row = db.discord_doc(key)
-    reported = report.get(key) or {}
+    reported = report.get("channels_doc" if key == "channels" else key)
+    reported = reported if isinstance(reported, dict) else {}
     if row and row["published"] and reported.get("version") == row["version"] and reported.get("problems"):
         return ("down", "Problem")
     if row and row["draft"]:
@@ -1471,6 +1477,7 @@ DISCORD_DOCS = {"welcome": (welcome_doc.default_welcome, welcome_doc.check_welco
                 "matchping": (welcome_doc.default_matchping, welcome_doc.check_matchping),
                 "weekly": (welcome_doc.default_weekly, welcome_doc.check_weekly),
                 "staffalerts": (welcome_doc.default_staffalerts, welcome_doc.check_staffalerts),
+                "feedback": (welcome_doc.default_feedback, welcome_doc.check_feedback),
                 "channels": (welcome_doc.default_channels, welcome_doc.check_channels),
                 "factions": (welcome_doc.default_factions, welcome_doc.check_factions)}
 

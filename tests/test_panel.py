@@ -1593,7 +1593,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         await self.login("boss", "boss-password")
         home = await (await self.client.get("/discord")).text()
         for key in ("welcome", "greeting", "serverinfo", "factions", "matchping", "weekly", "bans", "staffalerts",
-                    "posts", "links", "channels", "names"):
+                    "posts", "links", "channels", "names", "feedback"):
             self.assertIn(f'href="/discord/{key}"', home)
         self.assertIn("What new members see", home)
         self.assertIn("Bot&#39;s default", home)
@@ -1609,6 +1609,21 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             "doc": json.dumps({"on": True, "count": "4", "seconds": "90", "ping_role": "Admin"})})
         doc = json.loads(self.db.discord_doc("staffalerts")["published"])
         self.assertEqual(doc, {"on": True, "count": 4, "seconds": 90, "ping_role": "Admin"})
+
+    async def test_feedback_settings_page(self):
+        await self.login("boss", "boss-password")
+        page = await (await self.client.get("/discord/feedback")).text()
+        self.assertIn('data-kind="feedback"', page)
+        self.assertIn('action="/discord/feedback/channel"', page)
+        token = await self.csrf("/discord/feedback")
+        await self.client.post("/discord/feedback", data={"csrf": token, "action": "publish",
+            "doc": json.dumps({"on": True, "thanks": "Cheers!", "done_dm": "Sorted {topic}", "ping_role": "",
+                               "topics": ["Servers", "Bug"]})})
+        doc = json.loads(self.db.discord_doc("feedback")["published"])
+        self.assertEqual(doc, {"on": True, "thanks": "Cheers!", "done_dm": "Sorted {topic}", "ping_role": "",
+                               "topics": ["Servers", "Bug"]})
+        page = await (await self.client.get("/discord/feedback")).text()
+        self.assertIn("Servers\nBug</textarea>", page)
 
     async def test_weekly_top_three_wording(self):
         await self.login("boss", "boss-password")
@@ -1635,6 +1650,16 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             await self.client.post("/discord/channels", data={"csrf": token, "action": "publish",
                 "doc": json.dumps({"channels": {"LIVE_BOARD_CHANNEL_ID": "300"}, "roles": {}})})
         self.assertEqual(json.loads(self.db.discord_doc("channels")["published"])["channels"], {"LIVE_BOARD_CHANNEL_ID": "300"})
+
+    async def test_an_older_bots_bridge_does_not_break_the_discord_pages(self):
+        await self.login("boss", "boss-password")
+        self.db.publish_discord_doc("channels", json.dumps({"channels": {"STAFF_ALERT_CHANNEL_ID": "300"}}), "gaz")
+        with tempfile.TemporaryDirectory() as data:
+            self.config.oyb_data = data
+            Path(data, "panel_bridge.json").write_text(json.dumps({"updated": now(),
+                "channels": {"version": 1, "at": now(), "problems": []}}))
+            for page in ("/discord", "/discord/staffalerts", "/discord/channels"):
+                self.assertEqual((await self.client.get(page)).status, 200, page)
 
     async def test_each_page_picks_its_own_channel(self):
         await self.login("boss", "boss-password")

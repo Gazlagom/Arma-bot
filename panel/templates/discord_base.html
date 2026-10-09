@@ -12,19 +12,19 @@
     <form method="post" action="/discord/{{ page }}/channel" class="card dc-pick">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <label>Channel
-        <select name="channel">
+        <select name="channel" data-autosubmit>
           <option value="">{{ pick.default }}</option>
           {% for group in bridge.get("channels", [])|groupby("category") %}
           <optgroup label="{{ group.grouper or 'No category' }}">{% for c in group.list %}<option value="{{ c.id }}" {% if c.id == pick.picked %}selected{% endif %}>#{{ c.name }}</option>{% endfor %}</optgroup>
           {% endfor %}
         </select></label>
       <button class="small">Change channel</button>
-      <p class="muted">{% if now_name %}In #{{ now_name }} now. {% endif %}A change moves it within a minute, no publishing or restart needed.</p>
+      <p class="muted">{% if now_name %}In #{{ now_name }} now. {% endif %}Picking one saves it straight away, apart from Publish below, and the bot moves there within a minute.</p>
     </form>
     {% endif %}
     {% if kind not in ("posts", "links") %}
     <div class="dc-status card">
-      {% set reported = bridge.get("post") if kind == "post" else bridge.get(page) %}
+      {% set reported = bridge.get("post") if kind == "post" else bridge.get("channels_doc" if page == "channels" else page) %}
       {% if live %}
         <p><span class="pill on">Live</span> Published {{ row.published_at|ago }} by <b>{{ row.published_by }}</b>.
         {% if not bridge %}
@@ -39,7 +39,7 @@
         <ul class="dc-problems">{% for p in reported.problems %}<li>{{ p }}</li>{% endfor %}</ul>
         {% endif %}
       {% else %}
-        <p><span class="pill">Not published</span> {% if kind == "post" %}Only you and other owners can see this post until you publish it.{% elif page == "greeting" %}The bot doesn't greet anyone until you publish one.{% elif page == "names" %}The bot uses its built-in names until you publish.{% elif page == "bans" %}The bot uses the ban settings in its <code>.env</code> until you publish; the boxes below start with those.{% elif page == "channels" %}The bot uses the channels and roles in its <code>.env</code> until you publish.{% elif page == "matchping" %}Match alerts use the bot's built-in wording, on every server, until you publish.{% elif page == "staffalerts" %}Mass teamkill alerts are on with 3 teamkills in 60 seconds until you publish; they need a channel picked here.{% elif page == "weekly" %}The weekly top 3 uses the bot's built-in wording until you publish.{% elif page == "factions" %}The factions keep the bot's built-in names, colours and emojis until you publish.{% elif page == "serverinfo" %}The #servers card shows the bot's built-in wording until you publish.{% else %}Discord still shows the bot's built-in version. Nothing changes there until you publish.{% endif %}</p>
+        <p><span class="pill">Not published</span> {% if kind == "post" %}Only you and other owners can see this post until you publish it.{% elif page == "greeting" %}The bot doesn't greet anyone until you publish one.{% elif page == "names" %}The bot uses its built-in names until you publish.{% elif page == "bans" %}The bot uses the ban settings in its <code>.env</code> until you publish; the boxes below start with those.{% elif page == "channels" %}The bot uses the channels and roles in its <code>.env</code> until you publish.{% elif page == "matchping" %}Match alerts use the bot's built-in wording, on every server, until you publish.{% elif page == "staffalerts" %}Mass teamkill alerts are on with 3 teamkills in 60 seconds until you publish; they need a channel picked here.{% elif page == "feedback" %}Feedback is on, with the bot's own wording, until you publish; it needs a channel picked here.{% elif page == "weekly" %}The weekly top 3 uses the bot's built-in wording until you publish.{% elif page == "factions" %}The factions keep the bot's built-in names, colours and emojis until you publish.{% elif page == "serverinfo" %}The #servers card shows the bot's built-in wording until you publish.{% else %}Discord still shows the bot's built-in version. Nothing changes there until you publish.{% endif %}</p>
       {% endif %}
       {% if draft %}<p><span class="pill gold">Draft</span> Unpublished changes saved {{ row.draft_at|ago }} by <b>{{ row.draft_by }}</b>. Only you and other owners see them here.</p>{% endif %}
       {% if problems %}

@@ -52,6 +52,14 @@ if (form && form.dataset.kind === "staffalerts") {
       seconds: field("seconds").value, ping_role: field("ping_role").value });
   });
 }
+if (form && form.dataset.kind === "feedback") {
+  form.addEventListener("submit", () => {
+    const field = (name) => form.querySelector(`[name="${name}"]`);
+    document.getElementById("dc-doc").value = JSON.stringify({ on: field("on").checked, thanks: field("thanks").value,
+      done_dm: field("done_dm").value, ping_role: field("ping_role").value,
+      topics: field("topics").value.split("\n").map((t) => t.trim()).filter(Boolean) });
+  });
+}
 if (form && form.dataset.kind === "factions") factionsEditor();
 if (form && form.dataset.kind === "channels") {
   form.addEventListener("submit", () => {
@@ -149,7 +157,7 @@ function bansEditor() {
     else {
       const url = field("panel_url").value.trim().replace(/\/$/, "");
       const lines = ["**Length:** 7 days", "**Ends:** Tuesday 7 October 2026 21:40 (in 7 days)",
-        "**Reason:** Spawning explosions", "`4bd39e3d-a6e3-4090-a338-00e1dc08ca69`"];
+        "**Reason:** Spawning explosions", "**Banned by:** Gazlagom", "`4bd39e3d-a6e3-4090-a338-00e1dc08ca69`"];
       if (url) lines.push(`${url}/player/4bd39e3d-…`);
       ticket.replaceChildren(author(), embed(field("ticket_title").value || field("ticket_title").dataset.default,
         "@Buford opened this ticket while banned on this account.", [["Buford", lines.join("\n")]]));
