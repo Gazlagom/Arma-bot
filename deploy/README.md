@@ -61,3 +61,33 @@ oyb setup
 
 Rerun `oyb setup` to enable Server 2/3 and choose distinct local log directories.
 Updating/restarting the bot never resets XP or starts a new game.
+
+## Automatic updates
+
+To have the box pick up new commits by itself, run this once from either checkout:
+
+```bash
+bash deploy/auto_update_setup.sh
+```
+
+Every 10 minutes `oyb-update.timer` fetches from GitHub for the panel's and the
+bot's checkouts (found from their services). With nothing new it does nothing.
+With something new it fast-forwards, installs new requirements if they changed,
+and restarts only the service whose code changed. If a service won't start on
+the new version, the old one is put back and restarted. A checkout with its own
+local commits is left alone. Everything is logged to `/var/log/oyb-update.log`.
+Turn it off with `systemctl disable --now oyb-update.timer`.
+
+## In-game admins through AMP
+
+The panel's **In-game admins** page reads and changes each server's Admins
+setting in AMP. Give the panel an AMP login once (best a user just for it):
+
+```bash
+bash deploy/amp_login.sh
+```
+
+It checks the login, shows which servers it matched to AMP instances, saves it
+in `panel.local.json` and restarts the panel. Servers are matched by the AMP
+instance folder in their log path; set `"amp_instance"` on a server in
+`panel.local.json` if that doesn't work.
