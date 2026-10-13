@@ -20,11 +20,43 @@ other in the same moment is the same thing seen from the other side.
 """
 
 import math
+import re
 from collections import Counter, defaultdict, deque
 
 EXPLOSIVE = {"EXPLOSIVE", "FRAGMENTATION", "INCENDIARY"}
 # An AP mine goes off under someone, so the game puts the hit in a foot.
 FEET = {"LFoot", "RFoot"}
+
+DAMAGE = {"KINETIC": "bullet", "EXPLOSIVE": "explosion", "FRAGMENTATION": "grenade or shrapnel", "INCENDIARY": "fire",
+          "FIRE": "fire", "BLEEDING": "bled out", "COLLISION": "vehicle", "MELEE": "melee"}
+
+
+def body_part(zone):
+    """The log's hit zones (RArm, LThigh, Head) as plain words."""
+    side = {"L": "left ", "R": "right "}.get(zone[:1], "") if zone[1:2].isupper() else ""
+    rest = zone[len(side) and 1:]
+    return side + re.sub(r"(?<!^)(?=[A-Z])", " ", rest).lower()
+
+
+def feet(blasts):
+    """How many explosive deaths hit the feet, which is how an AP mine shows up."""
+    count = sum(b.get("zone") in FEET for b in blasts)
+    if not count:
+        return ""
+    if count == len(blasts):
+        return ". All to the feet, most likely AP mines"
+    return f". {count} of them to the feet, most likely AP mines"
+
+
+def how(e):
+    """One kill in plain words: "bullet to the chest from 412 m"."""
+    damage = e.get("damage")
+    text = DAMAGE.get(damage, (damage or "unknown").lower())
+    if e.get("zone"):
+        text += f" to the {body_part(e['zone'])}"
+    if e.get("distance") and damage == "KINETIC":
+        text += f" from {e['distance']:,.0f} m"
+    return text
 
 DEFAULTS = {
     "ai_explosions": 5,           # explosive deaths credited to AI ...
@@ -187,7 +219,7 @@ class Detector:
             if len(same) >= s["same_second"]:
                 flags += self._flag(("same_second",), at,
                                     f"{len(same)} players were blown up in the same second by explosions the game "
-                                    "credits to AI, so they don't show in the kill feed", self.ai_blasts)
+                                    "credits to AI, so they don't show in the kill feed" + feet(same), self.ai_blasts)
             if len(self.ai_blasts) >= s["ai_explosions"]:
                 window = s["ai_explosions_window"] // 60
                 flags += self._flag(("ai_explosions",), at,
@@ -209,8 +241,10 @@ class Detector:
         rifle = [k for k in mine if k["kind"] == "kill" and k.get("damage") == "KINETIC"]
         rapid = [k for k in rifle if k["at"] >= at - s["rapid_window"]]
         if len(rapid) >= s["rapid_kills"]:
+            heads = sum(k.get("zone") == "Head" for k in rapid)
             flags += self._flag(("rapid", e["killer"]), at,
-                                f"{who} got {len(rapid)} kills in {s['rapid_window']} seconds", identity=e["killer"])
+                                f"{who} got {len(rapid)} bullet kills in {s['rapid_window']} seconds"
+                                + (f", {plural(heads, 'headshot')}" if heads else ""), identity=e["killer"])
         longs = [k for k in rifle if (k.get("distance") or 0) >= s["long_shot"]]
         if len(longs) >= s["long_shots"]:
             far = max(k["distance"] for k in longs)
@@ -239,7 +273,7 @@ class Detector:
         return self._flag(("teleport", e["killer"]), e["at"],
                           f"{who} got a kill {gap:,.0f} m away from their last one only "
                           f"{plural(seconds, 'second')} later, without dying in between. Nothing in the game "
-                          "moves that fast",
+                          f"moves that fast. That kill: {how(e)}",
                           identity=e["killer"])
 
     def _spread(self, e, mine, who):
@@ -251,10 +285,14 @@ class Detector:
                 continue
             apart = metres(k["victim_at"], e["victim_at"])
             if apart >= self.s["spread"]:
+                mines = all(x.get("zone") in FEET and x.get("damage") in EXPLOSIVE for x in (k, e))
                 return self._flag(("spread", e["killer"]), e["at"],
                                   f"{who} killed two players who were {apart:,.0f} m apart from each other "
                                   + ("in the same second" if e["at"] == k["at"]
-                                     else f"within {plural(e['at'] - k['at'], 'second')}"),
+                                     else f"within {plural(e['at'] - k['at'], 'second')}")
+                                  + f". {k.get('victim_name') or 'Someone'}: {how(k)}. "
+                                  + f"{e.get('victim_name') or 'Someone'}: {how(e)}."
+                                  + (" Both explosions to the feet, most likely AP mines left earlier." if mines else ""),
                                   identity=e["killer"])
         return []
 

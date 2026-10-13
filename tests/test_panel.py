@@ -629,7 +629,7 @@ class SuspicionTests(unittest.TestCase):
         tks = "".join(shot(f"09:0{i}:00.000", "Rogue", person(72), i, 0, 0).replace("KILL ENEMY", "KILL TK")
                       for i in range(5))
         texts = [f["text"] for f in self.flags(rapid + heads + tks)]
-        self.assertEqual(texts, ["Spray got 6 kills in 30 seconds", "Aimer got 10 kills in 15 minutes and 10 of them were headshots",
+        self.assertEqual(texts, ["Spray got 6 bullet kills in 30 seconds", "Aimer got 10 kills in 15 minutes and 10 of them were headshots",
                                  "Rogue has teamkilled 5 times this game. Killed: Victim0, Victim1, Victim2, Victim3, Victim4"])
         # Four isn't enough any more: grenades and mortars make that much by accident.
         self.assertEqual(self.flags(tks.replace("09:04:00", "09:24:00")), [])
@@ -649,7 +649,7 @@ class SuspicionTests(unittest.TestCase):
     def test_teleporting_between_kills(self):
         jump = shot("07:00:00.000", "Blink", person(73), 1, 1000, 1000) + shot("07:00:05.000", "Blink", person(73), 2, 4000, 1000)
         flags = self.flags(jump)
-        self.assertEqual([f["text"] for f in flags], ["Blink got a kill 3,000 m away from their last one only 5 seconds later, without dying in between. Nothing in the game moves that fast"])
+        self.assertEqual([f["text"] for f in flags], ["Blink got a kill 3,000 m away from their last one only 5 seconds later, without dying in between. Nothing in the game moves that fast. That kill: bullet to the head from 40 m"])
         self.assertEqual(flags[0]["identity"], person(73))
         died = (shot("07:00:00.000", "Blink", person(73), 1, 1000, 1000)
                 + shot("07:00:02.000", "Someone", person(74), 73, 1000, 1000).replace("Victim73", "Blink")
@@ -665,7 +665,14 @@ class SuspicionTests(unittest.TestCase):
                          ["Eagle shot and killed 3 players from over 800 m away in 15 minutes. The longest was 1,100 m and 1 was a headshot."])
         apart = (shot("07:00:00.000", "Split", person(77), 1, 0, 0, metres=100)
                  + shot("07:00:01.000", "Split", person(77), 2, 0, 900, metres=100).replace("<60, 30, 920>", "<0, 30, 0>"))
-        self.assertEqual([f["text"] for f in self.flags(apart)], ["Split killed two players who were 900 m apart from each other within 1 second"])
+        self.assertEqual([f["text"] for f in self.flags(apart)], [
+            "Split killed two players who were 900 m apart from each other within 1 second. "
+            "Victim1: bullet to the head from 100 m. Victim2: bullet to the head from 100 m."])
+        mines = "".join(shot(f"07:10:0{i}.000", "Sapper", person(78), 3 + i, 0, i * 1000, zone="RFoot", metres=0)
+                        .replace("KINETIC", "EXPLOSIVE").replace(f"<60, 30, {i * 1000 + 20}>", "<0, 30, 0>") for i in range(2))
+        self.assertIn("Victim3: explosion to the right foot. Victim4: explosion to the right foot. "
+                      "Both explosions to the feet, most likely AP mines left earlier.",
+                      " ".join(f["text"] for f in self.flags(mines)))
 
     def test_script_error_spike(self):
         def error(clock, where):
@@ -1392,14 +1399,14 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(f"/bans/{theirs}/edit", bans)
         token = await self.csrf("/bans")
         await self.client.post(f"/bans/{mine}/edit", data={"csrf": token, "reason": "Teamkilled three times after a warning"})
-        self.assertEqual(self.db.ban(mine)["reason"], "Teamkilled three times after a warning")
+        self.assertEqual(self.db.ban(mine)["reason"], "Teamkilled three times after a warning. Appeal: discord.gg/oyb")
         self.assertEqual(self.db.audit()[0]["action"], "edit ban")
         response = await self.client.post(f"/bans/{theirs}/edit", data={"csrf": token, "reason": "x"},
                                           allow_redirects=False)
         self.assertEqual(response.status, 403)
         self.assertEqual(self.db.ban(theirs)["reason"], "cheating")
         await self.client.post(f"/bans/{mine}/edit", data={"csrf": token, "reason": "  "})
-        self.assertEqual(self.db.ban(mine)["reason"], "Teamkilled three times after a warning")
+        self.assertEqual(self.db.ban(mine)["reason"], "Teamkilled three times after a warning. Appeal: discord.gg/oyb")
 
     async def test_owners_change_any_ban_without_unbanning(self):
         ban = self.db.add_ban(BUFORD, "Buford", "tk", "someone-else", now() + 3600)
@@ -1411,7 +1418,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         token = await self.csrf("/bans")
         await self.client.post(f"/bans/{ban}/edit", data={"csrf": token, "reason": "Mass TK", "duration": "0"})
         row = self.db.ban(ban)
-        self.assertEqual((row["reason"], row["expires_at"], row["removed_at"]), ("Mass TK", None, None))
+        self.assertEqual((row["reason"], row["expires_at"], row["removed_at"]), ("Mass TK. Appeal: discord.gg/oyb", None, None))
         self.assertTrue(any(c.startswith("#ban remove") for c in self.fake.commands))
         self.assertTrue(any(c.startswith(f"#ban create {BUFORD} 0 ") for c in self.fake.commands))
         await self.client.post(f"/bans/{ban}/edit", data={"csrf": token, "reason": "Mass TK", "duration": "custom",
@@ -1419,7 +1426,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(self.db.ban(ban)["expires_at"], now() + 2 * 86400, delta=5)
         await self.client.post(f"/bans/{ban}/edit", data={"csrf": token, "reason": "Mass TK again", "duration": "keep"})
         self.assertAlmostEqual(self.db.ban(ban)["expires_at"], now() + 2 * 86400, delta=5)
-        self.assertEqual(self.db.ban(ban)["reason"], "Mass TK again")
+        self.assertEqual(self.db.ban(ban)["reason"], "Mass TK again. Appeal: discord.gg/oyb")
 
     async def test_admins_only_reword_their_own_bans(self):
         self.db.add_user("adm", auth.hash_password("adm-password"), "admin")
@@ -1427,7 +1434,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         await self.login("adm", "adm-password")
         token = await self.csrf("/bans")
         await self.client.post(f"/bans/{mine}/edit", data={"csrf": token, "reason": "tk x3", "duration": "0"})
-        self.assertEqual((self.db.ban(mine)["reason"], bool(self.db.ban(mine)["expires_at"])), ("tk x3", True))
+        self.assertEqual((self.db.ban(mine)["reason"], bool(self.db.ban(mine)["expires_at"])), ("tk x3. Appeal: discord.gg/oyb", True))
         self.assertNotIn('value="keep"', await (await self.client.get("/bans")).text())
 
     async def test_public_site_on_its_own_domain(self):
@@ -1442,6 +1449,8 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("data-stale hidden", html)
         self.assertNotIn("No servers are listed", html)
         self.assertIn("Type <b>OYB</b> in the server browser search", html)
+        self.assertIn('class="button primary" href="https://discord.gg/oyb"', html)
+        self.assertNotIn("View servers", html)
         font = await self.client.get("/brand/fonts/Display.ttf", headers={"Host": "oybgaming.com"})
         self.assertEqual(font.status, 200)
         self.assertNotIn("Log in", html)
@@ -1513,6 +1522,11 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("#kick 0", self.fake.commands)
         entry = self.db.audit()[0]
         self.assertEqual((entry["username"], entry["action"], entry["target"]), ("mod", "kick", "Sgt Havoc"))
+        await self.client.post("/server/server-1/kick", data={"csrf": token, "player": "0", "name": "Sgt Havoc",
+                                                              "reason": "Teamkilling: warning"})
+        self.assertEqual(self.db.audit()[0]["detail"], "Teamkilling: warning. Appeal: discord.gg/oyb")
+        page = await (await self.client.get("/server/server-1")).text()
+        self.assertIn("<option>Toxic chat or VON: warning. Appeal: discord.gg/oyb</option>", page)
 
     async def test_moderator_cannot_ban_or_use_console(self):
         await self.login("mod", "mod-password")
@@ -1528,7 +1542,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         html = await (await self.client.post("/bans", data={
             "csrf": token, "identity": HAVOC.upper(), "name": "Sgt Havoc", "reason": "team killing", "duration": "86400"})).text()
         self.assertIn("Banned 1 account: Sgt Havoc (server-1: done", html)
-        self.assertEqual(self.fake.bans[HAVOC], "team killing")
+        self.assertEqual(self.fake.bans[HAVOC], "team killing. Appeal: discord.gg/oyb")
         self.assertEqual(sum(c.startswith("#ban create") for c in self.fake.commands), 1)
         ban = self.db.active_ban(HAVOC)
         await self.client.post(f"/bans/{ban['id']}/remove", data={"csrf": token})
@@ -2075,7 +2089,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         await self.client.post("/bans", data={"csrf": token, "identity": HAVOC, "name": "Sgt Havoc",
                                               "reason": "team killing", "duration": "3600"})
         title, _, fields = self.manager.alerts.sent[0]
-        self.assertEqual((title, fields["By"], fields["Reason"]), ("Banned Sgt Havoc", "boss", "team killing"))
+        self.assertEqual((title, fields["By"], fields["Reason"]), ("Banned Sgt Havoc", "boss", "team killing. Appeal: discord.gg/oyb"))
 
     async def test_connections_are_for_admins(self):
         with tempfile.TemporaryDirectory() as root:
@@ -2296,6 +2310,29 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         html = await (await self.client.get("/server/server-1")).text()
         self.assertNotIn("<script>alert", html)
         self.assertIn("&lt;script&gt;", html)
+
+
+class SusWordingTests(unittest.TestCase):
+    def test_feet_and_how(self):
+        from panel.suspicion import feet, how
+        self.assertEqual(feet([{"zone": "LFoot"}, {"zone": "RFoot"}]), ". All to the feet, most likely AP mines")
+        self.assertEqual(feet([{"zone": "LFoot"}, {"zone": "Head"}]), ". 1 of them to the feet, most likely AP mines")
+        self.assertEqual(feet([{"zone": "Chest"}]), "")
+        self.assertEqual(how({"damage": "EXPLOSIVE", "zone": "RFoot"}), "explosion to the right foot")
+        self.assertEqual(how({"damage": "KINETIC", "zone": "Head", "distance": 1049}), "bullet to the head from 1,049 m")
+
+
+class ReasonTests(unittest.TestCase):
+    def test_every_template_and_typed_reason_carries_the_appeal(self):
+        from panel.reasons import BAN_REASONS, KICK_REASONS, options, with_appeal
+        for reason in options(BAN_REASONS) + options(KICK_REASONS):
+            self.assertTrue(reason.endswith("Appeal: discord.gg/oyb"), reason)
+            self.assertLessEqual(len(reason), 200)
+        self.assertEqual(with_appeal("Cheating. Appeal at discord.gg/OYB"), "Cheating. Appeal at discord.gg/OYB")
+        self.assertEqual(with_appeal("Cheating."), "Cheating. Appeal: discord.gg/oyb")
+        long = with_appeal("x" * 300)
+        self.assertEqual(len(long), 200)
+        self.assertTrue(long.endswith("Appeal: discord.gg/oyb"))
 
 
 class SiteOrderTests(unittest.TestCase):
