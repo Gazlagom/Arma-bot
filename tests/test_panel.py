@@ -1430,15 +1430,6 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((self.db.ban(mine)["reason"], bool(self.db.ban(mine)["expires_at"])), ("tk x3", True))
         self.assertNotIn('value="keep"', await (await self.client.get("/bans")).text())
 
-    async def test_a_blank_command_hides_its_button(self):
-        await self.login("boss", "boss-password")
-        self.assertIn("Shut down (RCON)", await (await self.client.get("/server/server-1")).text())
-        self.config.servers[0].commands["shutdown"] = ""
-        self.assertNotIn("Shut down (RCON)", await (await self.client.get("/server/server-1")).text())
-        token = await self.csrf("/server/server-1")
-        await self.client.post("/server/server-1/power", data={"csrf": token, "action": "shutdown"})
-        self.assertIn("switched off", self.db.audit()[0]["detail"])
-
     async def test_public_site_on_its_own_domain(self):
         self.config.site_hosts = ["oybgaming.com"]
         home = await self.client.get("/", headers={"Host": "www.oybgaming.com"})
@@ -1446,6 +1437,10 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(home.status, 200)
         self.assertIn("Old Young Bastards.", html)
         self.assertIn("3 playing · 1 of 2 up", html)
+        self.assertIn("One community. Countless battles.", html)
+        self.assertIn('href="#leaderboards"', html)
+        self.assertIn("data-stale hidden", html)
+        self.assertNotIn("No servers are listed", html)
         font = await self.client.get("/brand/fonts/Display.ttf", headers={"Host": "oybgaming.com"})
         self.assertEqual(font.status, 200)
         self.assertNotIn("Log in", html)
@@ -1477,6 +1472,10 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Join via IP", html)
         self.assertIn("OYB Main", html)
         self.assertNotIn("Server 2", html)
+        await self.client.post("/website", data={"csrf": token, "name": "OYB Gaming", "about": "Hi"})
+        empty = await (await self.client.get("/", headers={"Host": "oybgaming.com"})).text()
+        self.assertIn("No servers are listed right now", empty)
+        self.assertNotIn('href="#servers"', empty)
         preview = await (await self.client.get("/website/preview")).text()
         self.assertIn("Preview of the public site", preview)
 
@@ -2021,17 +2020,15 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.get("/", allow_redirects=False)
         self.assertEqual(response.headers["Location"], "/login")
 
-    async def test_restart_mission_starts_a_memory_check(self):
-        state = self.manager.state("server-1")
-        state.config.service = "reforger-test"
-        self.manager.sampler = FakeProcess()
+    async def test_owners_get_no_server_actions(self):
         await self.login("boss", "boss-password")
+        page = await (await self.client.get("/server/server-1")).text()
+        self.assertNotIn("Server actions", page)
+        self.assertNotIn("Restart mission", page)
         token = await self.csrf("/server/server-1")
-        html = await (await self.client.post("/server/server-1/power", data={"csrf": token, "action": "restart_mission"})).text()
-        self.assertIn("Memory check in 3 minutes", html)
-        self.assertIn("Mission restart check", html)
-        self.assertIn("#restart", self.fake.commands)
-        self.assertEqual(state.check["by"], "boss")
+        response = await self.client.post("/server/server-1/power", data={"csrf": token, "action": "restart_mission"})
+        self.assertIn(response.status, (404, 405))
+        self.assertNotIn("#restart", self.fake.commands)
 
     async def test_brand_assets_need_no_login(self):
         self.assertEqual((await self.client.get("/brand/fonts/Display.ttf")).status, 200)
