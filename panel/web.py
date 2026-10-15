@@ -16,11 +16,12 @@ from aiohttp import web
 from bot.discord import welcome_doc
 from bot.discord.ban_roles import length_text
 from bot.mortar.calibration import calibration, image_path, tile_path
+from bot.mortar import heights
 from bot.web import server as mortar_server
 from bot.mortar.solution import OUT_OF_RANGE, apply_wind, bearing, parse_grid, profiles
 from bot.mortar.wind import Wind
 
-from . import archive, auth, investigate, maptiles, memory, outliers, site
+from . import archive, auth, investigate, maptiles, memory, outliers, site, whois
 from .amp import MAX_ADMINS, Amp, AmpError, instance_name as amp_instance_name
 from .alerts import GOLD, GREEN, RED
 from .config import PanelConfig
@@ -380,7 +381,7 @@ GUIDE = [
     ("history", "Past games", "Pulling up any day's games, and downloading or uploading logs.", None),
     ("health", "Health and memory", "Uptime, crashes, and when a server needs a full restart.", None),
     ("discord", "Discord", "What gets posted for staff, teamkill alerts, and linked accounts.", None),
-    ("console-audit", "Console and audit log", "Raw RCON commands, and the record of who did what.", "audit"),
+    ("console-audit", "Audit log", "The record of who did what in the panel.", "audit"),
     ("discord-messages", "Discord messages", "Every Discord page: what the bot posts, where, and staff alerts.", "discord"),
     ("discord-tutorial", "Discord tutorial", "Every Discord page step by step, with pictures. Also as a PDF.", "discord"),
     ("website", "The website", "The public site: its words, servers and rules.", "website"),
@@ -903,7 +904,7 @@ async def edit_ban(request):
         raise web.HTTPFound("/bans")
     any_ban = allowed(request, "edit_bans")
     if not any_ban and not (allowed(request, "ban") and ban["created_by"] == by):
-        raise web.HTTPForbidden(text="Only the admin who made this ban, or an owner, can change it.")
+        raise web.HTTPForbidden(text="Only the admin who made this ban, or a senior admin, can change it.")
     form = await request.post()
     reason = clean(form.get("reason", ""))
     if not reason:
@@ -1345,8 +1346,11 @@ async def mortar_page(request):
                       "others": [r for r in fired.every if fired.final and r.ring != fired.final.ring]}
         except ValueError as exc:
             error = str(exc)
+    ground = heights.load() is not None
+    if not ground:
+        asyncio.get_running_loop().run_in_executor(None, heights.ensure)
     return render(request, "mortar.html", loaded=loaded, weapon=weapon, form=form, result=result, error=error,
-                  out_of_range=OUT_OF_RANGE, mapped=mortar_map(), job=maptiles.read_status(),
+                  ground=ground, out_of_range=OUT_OF_RANGE, mapped=mortar_map(), job=maptiles.read_status(),
                   sharp=maptiles.SHARP, free=maptiles.free_memory(), sharp_memory=maptiles.SHARP_MEMORY)
 
 
@@ -1635,6 +1639,26 @@ async def discord_home(request):
         if items:
             groups.append({"title": title, "pages": items})
     return render(request, "discord_home.html", groups=groups, bridge=report)
+
+
+async def bot_data_page(request):
+    require(request, "users")
+    identity = request.query.get("player", "").strip().lower()
+    report = request.app[STATS].health(identity if valid_identity(identity) else "")
+    return render(request, "bot_data.html", report=report, identity=identity)
+
+
+async def ip_lookup_page(request):
+    require(request, "ips")
+    typed = request.query.get("ip", "").strip()
+    ip = whois.clean_ip(typed)
+    result = accounts = None
+    if ip:
+        result = await whois.lookup(ip)
+        accounts = request.app[DB].ip_accounts(ip)
+        audit(request, "ip lookup", target=ip)
+    return render(request, "ip_lookup.html", typed=typed, ip=ip, result=result, accounts=accounts,
+                  banned=ip in request.app[DB].banned_ips() if ip else False)
 
 
 BOT_UNIT = "reforger-timer.service"
@@ -1934,30 +1958,6 @@ def name_clashes(doc, servers):
     return problems
 
 
-# console
-
-async def console_page(request):
-    require(request, "console")
-    return render(request, "console.html", output=None, chosen="", command="")
-
-
-async def console(request):
-    require(request, "console")
-    form = await request.post()
-    server_id, command = form.get("server", ""), form.get("command", "").strip()
-    server_or_404(request, server_id)
-    if not command or "\n" in command:
-        flash(request, "Type one command.", "error")
-        raise web.HTTPFound("/console")
-    try:
-        output = await request.app[MANAGER].command(server_id, command)
-        ok = True
-    except RconError as exc:
-        output, ok = f"Error: {exc}", False
-    audit(request, "console", server_id, command, clean(output, 300), ok=ok)
-    return render(request, "console.html", output=output, chosen=server_id, command=command)
-
-
 # audit
 
 async def audit_page(request):
@@ -2028,7 +2028,7 @@ async def change_user(request):
         if role not in auth.ROLES:
             raise web.HTTPBadRequest(text="Unknown role.")
         if last_owner and role != "owner":
-            flash(request, "There has to be at least one owner.", "error")
+            flash(request, "There has to be at least one senior admin.", "error")
         else:
             db.write("UPDATE users SET role = ? WHERE id = ?", role, target["id"])
             audit(request, "changed role", target=target["username"], detail=f"{target['role']} → {role}")
@@ -2046,7 +2046,7 @@ async def change_user(request):
         flash(request, f"{target['username']}'s extra access saved.")
     elif action in ("disable", "enable"):
         if action == "disable" and (target["id"] == request[USER]["id"] or last_owner):
-            flash(request, "You can't disable yourself or the last owner.", "error")
+            flash(request, "You can't disable yourself or the last senior admin.", "error")
         else:
             db.write("UPDATE users SET disabled = ? WHERE id = ?", int(action == "disable"), target["id"])
             if action == "disable":
@@ -2079,7 +2079,7 @@ def create_app(config: PanelConfig, db: PanelDB | None = None, manager: ServerMa
     app[AMP] = Amp(**config.amp) if config.amp else None
     env = jinja2.Environment(loader=jinja2.FileSystemLoader(HERE / "templates"),
                              autoescape=True, trim_blocks=True, lstrip_blocks=True)
-    env.filters.update(ts=_ts, ago=_ago, clock=_clock, hms=_hms, until=_until, span=_span, gb=memory.gb,
+    env.filters.update(rolename=lambda role: auth.ROLE_NAMES.get(role, role), ts=_ts, ago=_ago, clock=_clock, hms=_hms, until=_until, span=_span, gb=memory.gb,
                        part=lambda zone: body_part(zone) if zone else "")
     env.globals.update(ban_reasons=reason_options(BAN_REASONS), kick_reasons=reason_options(KICK_REASONS))
     app[JINJA] = env
@@ -2089,6 +2089,8 @@ def create_app(config: PanelConfig, db: PanelDB | None = None, manager: ServerMa
             app[MANAGER].start()
             if app[BM]:
                 app[BM].start()
+            if heights.load() is None:
+                asyncio.get_running_loop().run_in_executor(None, heights.ensure)
             yield
             if app[BM]:
                 await app[BM].stop()
@@ -2150,14 +2152,14 @@ def create_app(config: PanelConfig, db: PanelDB | None = None, manager: ServerMa
     app.router.add_post("/game-admins/{id}/restart", restart_through_amp)
     app.router.add_get("/discord", discord_home)
     app.router.add_post("/bot/restart", restart_bot)
+    app.router.add_get("/bot/data", bot_data_page)
+    app.router.add_get("/ip-lookup", ip_lookup_page)
     app.router.add_post("/discord/posts/new", new_post)
     app.router.add_get("/discord/posts/{post}", post_page)
     app.router.add_post("/discord/posts/{post}", post_save)
     app.router.add_post("/discord/{page}/channel", set_page_channel)
     app.router.add_get("/discord/{page}", discord_page)
     app.router.add_post("/discord/{page}", discord_save)
-    app.router.add_get("/console", console_page)
-    app.router.add_post("/console", console)
     app.router.add_get("/audit", audit_page)
     app.router.add_get("/users", users_page)
     app.router.add_post("/users", add_user)

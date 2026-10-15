@@ -128,7 +128,7 @@ class AuthTests(unittest.TestCase):
         self.assertTrue(auth.can("moderator", "kick"))
         self.assertFalse(auth.can("moderator", "ban"))
         self.assertTrue(auth.can("admin", "ban"))
-        self.assertFalse(auth.can("admin", "console"))
+        self.assertFalse(auth.can("admin", "users"))
         self.assertTrue(auth.can("owner", "users"))
         self.assertFalse(auth.can("nobody", "view"))
 
@@ -1567,13 +1567,12 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         page = await (await self.client.get("/server/server-1")).text()
         self.assertIn("<option>Toxic chat or VON: warning. Appeal: discord.gg/oyb</option>", page)
 
-    async def test_moderator_cannot_ban_or_use_console(self):
+    async def test_moderator_cannot_ban(self):
         await self.login("mod", "mod-password")
         token = await self.csrf()
         response = await self.client.post("/bans", data={"csrf": token, "identity": HAVOC, "reason": "x", "duration": "0"})
         self.assertEqual(response.status, 403)
-        self.assertEqual((await self.client.get("/console")).status, 403)
-        self.assertNotIn("Console", await (await self.client.get("/")).text())
+        self.assertNotIn("Bot data", await (await self.client.get("/")).text())
 
     async def test_ban_and_unban_hit_the_server(self):
         await self.login("boss", "boss-password")
@@ -1611,7 +1610,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_owner_guide_pages(self):
         await self.login("boss", "boss-password")
-        self.assertIn("Signed in as an <b>owner</b>", await (await self.client.get("/")).text())
+        self.assertIn("Signed in as a <b>senior admin</b>", await (await self.client.get("/")).text())
         for slug in ("console-audit", "discord-messages", "admins"):
             self.assertEqual((await self.client.get(f"/guide/{slug}")).status, 200)
         banning = await (await self.client.get("/guide/banning")).text()
@@ -1656,6 +1655,46 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(row["draft"])
         await self.client.post("/discord/welcome", data={"csrf": token, "action": "discard"})
         self.assertIsNone(self.db.discord_doc("welcome")["draft"])
+
+    async def test_bot_data_page_says_what_the_files_hold(self):
+        from panel.oyb_stats import OybStats
+        with tempfile.TemporaryDirectory() as data:
+            db = sqlite3.connect(Path(data, "playtime.sqlite3"))
+            db.execute("CREATE TABLE totals (identity TEXT, server TEXT, seconds INTEGER, name TEXT)")
+            db.execute("INSERT INTO totals VALUES ('abc', 's1', 3600, 'Bob')")
+            db.commit()
+            db.close()
+            Path(data, "account_links.sqlite3").write_bytes(b"not a database at all" * 100)
+            report = OybStats(data).health("abc")
+        playtime, links = report["files"]
+        self.assertEqual((playtime["check"], playtime["tables"]), ("ok", [("totals", 1)]))
+        self.assertIn("not a database", links["error"])
+        self.assertIn("'Bob'", report["player"]["SELECT server, seconds, name FROM totals WHERE identity = ?"])
+        await self.login("boss", "boss-password")
+        page = await (await self.client.get("/bot/data")).text()
+        self.assertIn("playtime.sqlite3", page)
+        await self.client.post("/logout", data={"csrf": await self.csrf("/")})
+        await self.login("mod", "mod-password")
+        self.assertEqual((await self.client.get("/bot/data", allow_redirects=False)).status, 403)
+
+    async def test_ip_lookup_page(self):
+        from tests.test_whois import ARIN
+        from panel import whois
+        self.db.add_connections("server-1", [{"identity": HAVOC, "ip": "99.102.29.3", "guid": "", "name": "Havoc", "at": now()}], {})
+        await self.login("boss", "boss-password")
+        self.assertIn("IP lookup", await (await self.client.get("/")).text())
+        with unittest.mock.patch("panel.whois.lookup", new=unittest.mock.AsyncMock(return_value={**whois.read(ARIN), "reverse": "x.att.net"})):
+            page = await (await self.client.get("/ip-lookup?ip=99.102.29.3")).text()
+        self.assertIn("AT&amp;T Corp.", page)
+        self.assertIn("99.96.0.0/11", page)
+        self.assertIn("x.att.net", page)
+        self.assertIn(f'href="/player/{HAVOC}"', page)
+        self.assertEqual(self.db.audit()[0]["action"], "ip lookup")
+        self.assertIn("isn't an IP address", await (await self.client.get("/ip-lookup?ip=nope")).text())
+        await self.client.post("/logout", data={"csrf": await self.csrf("/")})
+        await self.login("mod", "mod-password")
+        self.assertEqual((await self.client.get("/ip-lookup?ip=99.102.29.3", allow_redirects=False)).status, 403)
+        self.assertNotIn("IP lookup", await (await self.client.get("/")).text())
 
     async def test_bot_report_shows_on_the_page(self):
         await self.login("boss", "boss-password")
@@ -2059,7 +2098,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         token = await self.csrf("/users")
         boss = self.db.user_by_name("boss")
         html = await (await self.client.post(f"/users/{boss['id']}", data={"csrf": token, "action": "role", "role": "admin"})).text()
-        self.assertIn("at least one owner", html)
+        self.assertIn("at least one senior admin", html)
         self.assertEqual(self.db.user_by_name("boss")["role"], "owner")
 
     async def test_disabled_admin_is_logged_out(self):
@@ -2334,13 +2373,6 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         rcon = await (await self.client.get("/server/server-1/feed.part?show=rcon")).text()
         self.assertIn("Server 1 is online", rcon)
         self.assertNotIn("Player1 ", rcon)
-
-    async def test_console_is_audited(self):
-        await self.login("boss", "boss-password")
-        token = await self.csrf("/console")
-        html = await (await self.client.post("/console", data={"csrf": token, "server": "server-1", "command": "#status"})).text()
-        self.assertIn("ok: #status", html)
-        self.assertEqual(self.db.audit()[0]["target"], "#status")
 
     async def test_names_are_escaped(self):
         self.fake.players.append(("9", "<script>alert(1)</script>", "11111111-2222-4333-8444-555555555555"))

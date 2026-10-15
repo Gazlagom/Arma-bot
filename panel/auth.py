@@ -6,6 +6,8 @@ import time
 from .db import PanelDB, now
 
 ROLES = ("moderator", "admin", "owner")
+# What each role is called on screen; the stored names stay as they are.
+ROLE_NAMES = {"moderator": "moderator", "admin": "admin", "owner": "senior admin"}
 
 PERMISSIONS = {
     "view": "moderator",
@@ -18,7 +20,6 @@ PERMISSIONS = {
     "ips": "owner",
     "power": "owner",
     "audit": "admin",
-    "console": "owner",
     "users": "owner",
     "discord": "owner",
     "website": "owner",
@@ -35,7 +36,6 @@ GRANTS = (
     ("edit_bans", "Change any ban's reason or length"),
     ("ips", "See IPs and other accounts on the same IP"),
     ("audit", "Read the audit log"),
-    ("console", "Use the raw RCON console"),
     ("power", "Start, stop and restart servers"),
     ("website", "Edit the public website"),
     ("game_admins", "Make players admin in game (through AMP)"),
