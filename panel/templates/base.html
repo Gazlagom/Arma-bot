@@ -10,30 +10,39 @@
 <script src="/static/app.js?v={{ asset_version }}" defer></script>
 {% block head %}{% endblock %}
 </head>
-<body>
+<body{% if user %} class="app"{% endif %}>
 {% if user %}
-<header class="top">
-  <a class="brand" href="/"><img src="/static/oyb-mark.svg" alt=""><b>O.Y.B</b> <span>Control</span></a>
-  <nav>
-    <a href="/" {% if path == "/" %}class="on"{% endif %}>Servers</a>
-    <a href="/control" {% if path == "/control" %}class="on"{% endif %}>Control</a>
-    <a href="/players" {% if path.startswith("/player") %}class="on"{% endif %}>Players</a>
-    <a href="/bans" {% if path == "/bans" %}class="on"{% endif %}>Bans</a>
-    {% set more %}
-    {% if can("users") or can("ips") %}<a href="/data" class="extra{{ ' on' if path in ('/data', '/bot/data', '/ip-lookup') }}">Data</a>{% endif %}
-    {% if can("audit") %}<a href="/audit" class="extra{{ ' on' if path == '/audit' }}">Audit log</a>{% endif %}
-    {% if can("discord") %}<a href="/discord" class="extra{{ ' on' if path.startswith('/discord') }}">Discord</a>{% endif %}
-    {% if can("website") %}<a href="/website" class="extra{{ ' on' if path.startswith('/website') }}">Website</a>{% endif %}
-    {% if can("sus") %}<a href="/sus-settings" class="extra{{ ' on' if path == '/sus-settings' }}">Sus settings</a>{% endif %}
-    {% if can("mortar") %}<a href="/mortar" class="extra{{ ' on' if path == '/mortar' }}">Mortar</a>{% endif %}
-    {% if can("game_admins") %}<a href="/game-admins" class="extra{{ ' on' if path == '/game-admins' }}">In-game admins</a>{% endif %}
-    {% if can("users") %}<a href="/users" class="extra{{ ' on' if path == '/users' }}">Admins</a>{% endif %}
-    <a href="/guide" class="extra{{ ' on' if path.startswith('/guide') }}">Guide</a>
-    {% endset %}
-    {{ more }}
+<aside class="side">
+  <a class="side-brand" href="/"><b>OYB</b><span>Old Young Bastards</span></a>
+  <nav class="side-nav">
+    <a href="/" {% if path == "/" %}class="on"{% endif %}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/></svg>Dashboard</a>
+    <details class="side-group" open>
+      <summary{{ ' class=on' if path.startswith('/server/') }}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="7" rx="1"/><rect x="3" y="13" width="18" height="7" rx="1"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>Servers</summary>
+      {% for sv in nav_servers %}<a href="/server/{{ sv.id }}" class="sub{{ ' on' if path.startswith('/server/' ~ sv.id) }}"><i class="dot {{ 'ok' if sv.online else 'bad' }}"></i>{{ sv.name }}</a>{% endfor %}
+    </details>
+    <a href="/players" {% if path.startswith("/player") %}class="on"{% endif %}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.6 3.2-5.5 6.5-5.5s5.9 1.9 6.5 5.5"/><path d="M16 4.8a3.4 3.4 0 0 1 0 6.4M18 14.8c2 .7 3.2 2.4 3.5 5.2"/></svg>Players</a>
+    <a href="/bans" {% if path == "/bans" %}class="on"{% endif %}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M6 6l12 12"/></svg>Bans</a>
+    {% if can("users") or can("ips") or can("audit") %}<a href="/data" {% if path in ('/data', '/bot/data', '/ip-lookup', '/network', '/attacks', '/audit') %}class="on"{% endif %}><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>Data</a>{% endif %}
+    {% if can("discord") %}<a href="/discord" {% if path.startswith('/discord') %}class="on"{% endif %}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6.5C7 5 9 4.5 9 4.5l.6 1.3a14 14 0 0 1 4.8 0L15 4.5s2 .5 4 2c1.5 3 2 6.5 1.6 10.5-1.6 1.3-3.6 2-3.6 2l-1-1.6M5 6.5C3.5 9.5 3 13 3.4 17c1.6 1.3 3.6 2 3.6 2l1-1.6"/><circle cx="9" cy="12.5" r="1.3"/><circle cx="15" cy="12.5" r="1.3"/></svg>Discord</a>{% endif %}
+    {% if can("sus") or can("game_admins") or can("users") or can("website") or can("mortar") %}<a href="/settings" {% if path in ('/settings', '/sus-settings', '/game-admins', '/users', '/mortar') or path.startswith('/website') %}class="on"{% endif %}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings</a>{% endif %}
   </nav>
-  <div class="me">
-    <a href="/account">{{ user.username }}</a> <span class="role">{{ user.role|rolename }}</span>
+</aside>
+{% set more %}
+    {% if can("users") or can("ips") or can("audit") %}<a href="/data" class="extra{{ ' on' if path in ('/data', '/bot/data', '/ip-lookup', '/network', '/attacks', '/audit') }}">Data</a>{% endif %}
+    {% if can("discord") %}<a href="/discord" class="extra{{ ' on' if path.startswith('/discord') }}">Discord</a>{% endif %}
+    {% if can("sus") or can("game_admins") or can("users") or can("website") or can("mortar") %}<a href="/settings" class="extra{{ ' on' if path in ('/settings', '/sus-settings', '/game-admins', '/users', '/mortar') or path.startswith('/website') }}">Settings</a>{% endif %}
+    <a href="/guide" class="extra{{ ' on' if path.startswith('/guide') }}">Guide</a>
+{% endset %}
+<header class="topbar">
+  <a class="top-brand" href="/"><b>OYB</b></a>
+  <form class="top-search" method="get" action="/players" role="search">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+    <input type="search" name="q" placeholder="Search players, names or IDs…" aria-label="Search players">
+  </form>
+  <div class="top-user">
+    <a href="/guide" class="help{{ ' on' if path.startswith('/guide') }}" title="Guide" aria-label="Guide">?</a>
+    <a href="/account" class="who"><span class="avatar">{{ user.username[:2]|upper }}</span><span class="name">{{ user.username }}</span></a>
+    <span class="role">{{ user.role|rolename }}</span>
     <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link">Log out</button></form>
   </div>
 </header>
@@ -50,7 +59,6 @@
   <details class="menu">
     <summary><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>More</summary>
     <div class="menu-list">
-      <a href="/control" class="extra{{ ' on' if path == '/control' }}">Control</a>
       {{ more }}
       <a href="/account" class="extra">Account · {{ user.username }}</a>
       <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="link">Log out</button></form>

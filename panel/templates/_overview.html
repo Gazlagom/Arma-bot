@@ -1,0 +1,56 @@
+  <div class="ctl-grid">
+    <section class="ctl-panel">
+      <h2>Server information</h2>
+      <dl class="ctl-info">
+        <dt>Status</dt><dd class="{{ 'on' if info.online else 'off' }}">{{ "Online" if info.online else "Offline" }}</dd>
+        <dt>Uptime</dt><dd>{{ info.up_for|span if info.up_for else "—" }}</dd>
+        <dt>Game</dt><dd>Arma Reforger</dd>
+        <dt>Map</dt><dd>{{ info.map or "—" }}</dd>
+        <dt>Players</dt><dd>{{ info.players }}{% if info.slots %} / {{ info.slots }}{% endif %}</dd>
+        <dt>Server FPS</dt><dd>{{ info.fps|round|int if info.fps else "—" }}</dd>
+        <dt>CPU</dt><dd>{{ "%.0f%%"|format(info.cpu) if info.cpu is not none else "—" }}</dd>
+        <dt>Memory</dt><dd>{{ "%.1f GB"|format(info.memory / gb) if info.memory else "—" }}</dd>
+        <dt>Disk</dt><dd>{{ "%.0f%% used"|format(info.disk) if info.disk is not none else "—" }}</dd>
+        <dt>Ping</dt><dd>{{ "%.0f ms"|format(info.ping) if info.ping is not none else "—" }}</dd>
+      </dl>
+    </section>
+
+    <section class="ctl-panel">
+      <h2>Kill map <span class="muted">· last 30 minutes</span></h2>
+      {% if has_map %}
+      <div id="ctl-map" data-server="{{ s.id }}"></div>
+      <p class="ctl-legend"><span><i class="k"></i>Kill</span><span><i class="t"></i>Teamkill</span><span><i class="a"></i>Killed by AI or unknown</span></p>
+      {% else %}
+      <p class="muted">The map hasn't been downloaded yet. It comes with the mortar calculator.</p>
+      {% endif %}
+    </section>
+
+    <section class="ctl-panel">
+      <h2>Player list <span class="muted">({{ roster|length }})</span></h2>
+      <input type="search" class="ctl-search" placeholder="Search players…" data-filter-list="#ctl-players">
+      <div class="ctl-players" id="ctl-players">
+        <div class="ctl-row head"><span>Name</span><span>Playtime</span></div>
+        {% for p in roster %}
+        <a class="ctl-row" href="{{ '/player/' ~ p.identity if p.identity else '#' }}" data-name="{{ p.name|lower }}">
+          <span><i class="dot ok"></i>{{ p.name }}</span><span>{{ p.played|span }}</span></a>
+        {% else %}
+        <p class="muted">{{ "Nobody on right now." if info.online else "The server is offline." }}</p>
+        {% endfor %}
+      </div>
+    </section>
+  </div>
+
+  <div class="ctl-charts">
+    {% for title, kind, c, unit in charts %}
+    <section class="ctl-panel ctl-chart {{ kind }}">
+      <div class="ctl-chart-head"><h2>{{ title }}</h2>
+        <b>{% if c %}{% for l in c.lines %}{% if l.now is none %}—{% elif kind == "players" %}{{ l.now|round|int }}{% else %}{{ l.now|round(1) }}{% endif %}{{ " / " if not loop.last }}{% endfor %}{{ unit }}{% else %}—{% endif %}</b></div>
+      {% if c %}
+      <svg class="chart" viewBox="0 0 {{ c.width }} {{ c.height }}" preserveAspectRatio="none" role="img" aria-label="{{ title }}">
+        {% for l in c.lines %}{% for run in l.runs %}<polyline class="line {{ l.kind }}" points="{{ run }}"/>{% endfor %}{% endfor %}
+      </svg>
+      {% else %}<div class="chart empty">No readings yet</div>{% endif %}
+      <p class="muted">Last 60 minutes{% if kind == "net" %} · whole box, in / out{% endif %}</p>
+    </section>
+    {% endfor %}
+  </div>
