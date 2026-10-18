@@ -10,6 +10,65 @@ for (const box of document.querySelectorAll("[data-filter-list]")) {
   });
 }
 
+for (const button of document.querySelectorAll("[data-copy-text]")) {
+  button.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(button.dataset.copyText);
+      button.classList.add("done");
+      button.title = "Copied";
+    } catch (err) {
+      window.prompt("Copy this", button.dataset.copyText);
+    }
+    setTimeout(() => { button.classList.remove("done"); button.title = "Copy IP"; }, 1500);
+  });
+}
+
+/* The right-hand panel switches between who's on and the live feed; the choice is remembered. */
+const SIDE_TAB = "oyb-side-tab";
+for (const panel of document.querySelectorAll(".ctl-switch")) {
+  const box = panel.closest(".ctl-panel");
+  const show = (name) => {
+    for (const b of panel.querySelectorAll("[data-side-tab]")) b.classList.toggle("on", b.dataset.sideTab === name);
+    for (const part of box.querySelectorAll("[data-side-panel]")) part.hidden = part.dataset.sidePanel !== name;
+    const search = box.querySelector(".ctl-search");
+    if (search) search.hidden = name !== "players";
+  };
+  let saved = "players";
+  try { saved = localStorage.getItem(SIDE_TAB) || "players"; } catch (err) { /* private window */ }
+  show(saved);
+  panel.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-side-tab]");
+    if (!button) return;
+    show(button.dataset.sideTab);
+    try { localStorage.setItem(SIDE_TAB, button.dataset.sideTab); } catch (err) { /* private window */ }
+  });
+}
+
+/* Favourite servers are kept first, per browser. */
+const FAVOURITES = "oyb-favourite-servers";
+const favourites = () => { try { return JSON.parse(localStorage.getItem(FAVOURITES)) || []; } catch (err) { return []; } };
+function showFavourites(grid) {
+  const saved = favourites();
+  for (const card of [...grid.querySelectorAll(".ctl-card")].reverse()) {
+    const on = saved.includes(card.dataset.id);
+    const star = card.querySelector("[data-fav]");
+    if (star) { star.classList.toggle("on", on); star.setAttribute("aria-pressed", on); }
+    if (on) grid.prepend(card);
+  }
+}
+for (const grid of document.querySelectorAll("[data-favourites]")) {
+  showFavourites(grid);
+  grid.addEventListener("refreshed", () => showFavourites(grid));
+  grid.addEventListener("click", (event) => {
+    const star = event.target.closest("[data-fav]");
+    if (!star) return;
+    const saved = favourites().filter((id) => id !== star.dataset.fav);
+    if (!star.classList.contains("on")) saved.push(star.dataset.fav);
+    try { localStorage.setItem(FAVOURITES, JSON.stringify(saved)); } catch (err) { /* private window */ }
+    showFavourites(grid);
+  });
+}
+
 const mapBox = document.getElementById("ctl-map");
 if (mapBox && window.L) startMap(mapBox);
 
