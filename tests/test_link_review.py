@@ -57,12 +57,14 @@ def alert_embed(token):
 
 
 class FakeMsg:
-    def __init__(self, id, author_id, footer):
+    def __init__(self, id, author_id, footer, kind=discord.MessageType.default):
         self.id = id
         self.author = SimpleNamespace(id=author_id)
         e = discord.Embed(description="x")
         e.set_footer(text=footer)
-        self.embeds = [e]
+        self.embeds = [e] if footer else []
+        self.type = kind
+        self.pinned = False
         self.deleted = False
 
     async def delete(self):
@@ -94,12 +96,17 @@ class PruneTests(unittest.IsolatedAsyncioTestCase):
         pending = FakeMsg(2, 500, TOKEN_PREFIX + "abc")
         control = FakeMsg(7, 500, CONTROL_MARKER)
         foreign = FakeMsg(3, 999, HANDLED_MARKER)  # another user's message
-        channel = HistoryChannel([handled, pending, control, foreign])
+        automatic = FakeMsg(4, 500, link_review.AUTO_LINK_MARKER)
+        pin_notice = FakeMsg(5, 500, None, discord.MessageType.pins_add)
+        panel = FakeMsg(6, 500, link_review.AUTO_LINK_MARKER)
+        panel.pinned = True                       # pinned, even under an old id, is never cleared
+        channel = HistoryChannel([handled, pending, control, foreign, automatic, pin_notice, panel])
         guild = SimpleNamespace(id=1, get_channel=lambda i: channel)
         with patch.object(link_review.discord, "TextChannel", HistoryChannel):
             removed = await prune_handled(self.bot, guild)
-        self.assertEqual(removed, 1)
-        self.assertTrue(handled.deleted)
+        self.assertEqual(removed, 2)
+        self.assertTrue(handled.deleted and automatic.deleted)
+        self.assertFalse(pin_notice.deleted or panel.deleted)
         self.assertFalse(pending.deleted)
         self.assertFalse(control.deleted)
         self.assertFalse(foreign.deleted)

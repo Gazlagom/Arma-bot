@@ -19,6 +19,7 @@ REVIEW_MARKER = "OYB • Link request review (staff only)"
 CONTROL_MARKER = "OYB • Link request alerts control"
 TOKEN_PREFIX = "OYB • Link request • "
 HANDLED_MARKER = TOKEN_PREFIX + "handled"
+AUTO_LINK_MARKER = "OYB • Linked automatically"
 REVIEWER_ROLE_NAME = "OYB Link Reviewer"
 STAFF_PERMS = ("administrator", "manage_guild", "manage_channels", "manage_messages", "moderate_members")
 
@@ -322,7 +323,7 @@ async def post_auto_link(bot, guild, discord_id, identity, name):
         f"Game identity: `{identity}`\n\n"
         "Matched one tracked player that nobody had claimed, so it went through "
         "without review. Use **Remove a link** if that is wrong."))
-    embed.set_footer(text="OYB • Linked automatically")
+    embed.set_footer(text=AUTO_LINK_MARKER)
     try:
         await channel.send(embed=embed, silent=True,
                            allowed_mentions=discord.AllowedMentions.none())
@@ -434,9 +435,11 @@ async def post_request_alert(bot, guild, token):
                                                  roles=[role] if role else False, replied_user=False))
 
 
-async def prune_handled(bot, guild, older_than=86400):
-    """Delete approved/rejected request alerts older than a day so the staff
-    channel doesn't clog. Pending requests and the control message are kept."""
+async def prune_handled(bot, guild, older_than=3 * 3600):
+    """Delete finished request alerts and automatic-link notices once they're three
+    hours old, so the staff channel doesn't fill up. Requests still waiting, the
+    pinned admin panel and anything else pinned always stay; every link is kept
+    in the database anyway."""
     cfg = bot.account_links.review_settings(guild.id)
     channel = guild.get_channel(cfg["channel"]) if cfg["channel"] else None
     if not isinstance(channel, discord.TextChannel):
@@ -444,10 +447,10 @@ async def prune_handled(bot, guild, older_than=86400):
     cutoff = discord.utils.utcnow() - timedelta(seconds=older_than)
     removed = 0
     try:
-        async for message in channel.history(limit=200, before=cutoff):
-            if message.author.id != bot.user.id or message.id == cfg["control"]:
+        async for message in channel.history(limit=None, before=cutoff):
+            if message.author.id != bot.user.id or message.id == cfg["control"] or message.pinned:
                 continue
-            if any(e.footer and e.footer.text == HANDLED_MARKER for e in message.embeds):
+            if any(e.footer and e.footer.text in (HANDLED_MARKER, AUTO_LINK_MARKER) for e in message.embeds):
                 try:
                     await message.delete()
                     removed += 1
