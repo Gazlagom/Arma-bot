@@ -21,7 +21,10 @@ class FolderTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         (self.root / "Plus01" / "logs").mkdir(parents=True)
+        (self.root / "Plus01" / "GenericModule.kvp").write_text("")
         (self.root / "Other").mkdir()
+        (self.root / "Other" / "GenericModule.kvp").write_text("")
+        (self.root / "ADS01").mkdir()
         (self.root / "Other" / "secret.txt").write_text("not yours")
         os.symlink(self.root / "Other", self.root / "Plus01" / "sneaky")
 
@@ -41,7 +44,10 @@ class FolderTests(unittest.TestCase):
         servers = [ServerConfig("one", "One", log_dir="/home/amp/.ampdata/instances/A3x01/arma-reforger/x/logs")]
         self.assertEqual(files.instances_root(servers), Path("/home/amp/.ampdata/instances"))
         self.assertEqual(files.instances_root([]), Path(files.DEFAULT_ROOT))
+        # AMP's own controller has no game, so it isn't a server here.
         self.assertEqual(files.instances(self.root), ["Other", "Plus01"])
+        with self.assertRaises(files.FileError):
+            files.resolve(self.root, "ADS01")
 
     def test_mod_lists_read_and_write_the_way_amp_keeps_them(self):
         value = '{"modId": "60C4CE4888FF4621", "name": "ACE Core"},\n{"modId":"5DBD560C5148E1DA","name":"ACE Carrying","version":"1.2"}, junk'
@@ -61,6 +67,7 @@ class FileManagerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.root = Path(tempfile.mkdtemp())
         (self.root / "Plus01" / "Configs").mkdir(parents=True)
+        (self.root / "Plus01" / "GenericModule.kvp").write_text('App.AppSettings={"mods":""}')
         (self.root / "Plus01" / "Configs" / "serverconfig.json").write_text('{"a": 1}\n')
         (self.root / "Plus01" / "data.bin").write_bytes(b"\0\1\2")
         self.db = PanelDB(":memory:")
@@ -206,10 +213,16 @@ class FileManagerTests(unittest.IsolatedAsyncioTestCase):
         amp.power = mock.AsyncMock()
         amp.send_console = mock.AsyncMock()
         amp.set_config = mock.AsyncMock()
-        amp.settings_spec = mock.AsyncMock(return_value={"Server Settings:icon": [
-            {"Name": "Server name", "Node": "Game.Name", "InputType": "text", "CurrentValue": "OYB Plus"},
-            {"Name": "Visible", "Node": "Game.Visible", "InputType": "checkbox", "CurrentValue": True},
-            {"Name": "Admin password", "Node": "Game.AdminPassword", "InputType": "password", "CurrentValue": "secret"},
+        # AMP's settings list leaves the game's own settings out; they're read by name.
+        (self.root / "Plus01" / "configmanifest.json").write_text(json.dumps([
+            {"FieldName": "Name", "InputType": "text"}, {"FieldName": "Visible", "InputType": "checkbox"},
+            {"FieldName": "AdminPassword", "InputType": "password"}, {"FieldName": "Secret", "InputType": "hidden"}]))
+        amp.configs = mock.AsyncMock(return_value=[
+            {"Name": "Server name", "Node": "Game.Name", "InputType": "text", "CurrentValue": "OYB Plus", "Subcategory": "Server:dns:1"},
+            {"Name": "Visible", "Node": "Game.Visible", "InputType": "checkbox", "CurrentValue": True, "Subcategory": "Server:dns:1"},
+            {"Name": "Admin password", "Node": "Game.AdminPassword", "InputType": "password", "CurrentValue": "secret",
+             "Subcategory": "Server:dns:1"}])
+        amp.settings_spec = mock.AsyncMock(return_value={"System Settings": [
             {"Name": "Secret", "Node": "Game.Hidden", "Hidden": True, "CurrentValue": "x"}]})
         self.app[AMP] = amp
         running = mock.patch("panel.files.amp_running", return_value=True)
@@ -230,6 +243,8 @@ class FileManagerTests(unittest.IsolatedAsyncioTestCase):
 
         settings = await (await self.client.get("/manage/Plus01/settings")).text()
         self.assertIn("OYB Plus", settings)
+        self.assertEqual(amp.configs.await_args.args[1], ["Meta.GenericModule.Name", "Meta.GenericModule.Visible",
+                                                          "Meta.GenericModule.AdminPassword"])
         self.assertNotIn("secret", settings)
         self.assertNotIn("Game.Hidden", settings)
         await self.client.post("/manage/Plus01/settings", data=[("csrf", token), ("n:Game.Name", "OYB Plus 2"),
@@ -276,3 +291,21 @@ class AmpLoginTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("A3x01, Plus01", page)
         self.assertNotIn("right-one", page)
         self.assertNotIn("right-one", str(self.db.all("SELECT detail FROM audit")))
+
+
+class AmpNodeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_setting_missing_from_the_list_is_asked_for_by_name(self):
+        from panel.amp import Amp
+        amp = Amp("http://amp", "gaz", "pw")
+        replies = {"Core/GetSettingsSpec": {"Arma Reforger": [{"Node": "Meta.GenericModule.$GamePort", "Name": "Game Port"}]}}
+
+        async def call(http, base, session, endpoint, args=None):
+            if endpoint == "Core/GetConfig":
+                return {"Name": "Admins"} if args["node"] == "Meta.GenericModule.admins" else {}
+            return replies[endpoint]
+        amp._call = call
+        inst = {"InstanceID": "a", "InstanceName": "A3x01"}
+        self.assertEqual(await amp._admins_node(None, "b", "s", inst), "Meta.GenericModule.admins")
+        self.assertEqual(await amp._setting_node(None, "b", "s", inst, "admins"), "Meta.GenericModule.admins")
+        with self.assertRaises(AmpError):
+            await amp._setting_node(None, "b", "s", inst, "nothing")

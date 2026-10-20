@@ -33,9 +33,14 @@ def instances_root(servers):
     return Path(DEFAULT_ROOT)
 
 
+def is_game(folder):
+    """A game server's instance, not AMP's own controller (ADS), which has no game settings."""
+    return (folder / KVP).is_file()
+
+
 def instances(root):
     try:
-        return sorted(p.name for p in Path(root).iterdir() if p.is_dir() and not p.name.startswith("."))
+        return sorted(p.name for p in Path(root).iterdir() if p.is_dir() and not p.name.startswith(".") and is_game(p))
     except OSError:
         return []
 
@@ -45,7 +50,7 @@ def resolve(root, instance, rel=""):
     if not instance or "/" in instance or instance.startswith("."):
         raise FileError("No such server folder.")
     base = (Path(root) / instance).resolve()
-    if base.parent != Path(root).resolve() or not base.is_dir():
+    if base.parent != Path(root).resolve() or not base.is_dir() or not is_game(base):
         raise FileError("No such server folder.")
     target = (base / rel.strip("/")).resolve()
     if target != base and not target.is_relative_to(base):
@@ -208,7 +213,18 @@ def latest_console(base, tail=64 * 1024):
 
 
 KVP = "GenericModule.kvp"
+MANIFEST = "configmanifest.json"
 SETTINGS_LINE = "App.AppSettings="
+
+
+def game_fields(base):
+    """Every game setting the instance has, by field name, from its own manifest."""
+    try:
+        found = json.loads((base / MANIFEST).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [f["FieldName"] for f in found if isinstance(f, dict) and f.get("FieldName")
+            and str(f.get("InputType", "")).lower() != "hidden"]
 
 
 def kvp_mods(base):
