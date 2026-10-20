@@ -179,10 +179,15 @@ def flash(request, message, kind="ok"):
     request.app[FLASH].setdefault(request[USER]["id"], []).append((kind, message))
 
 
+def named(request, user=None):
+    """The panel's own owners (console_users in the config): they always have everything,
+    and they're the only ones who can manage manager accounts."""
+    return (user or request[USER])["username"].lower() in request.app[CONFIG].console_users
+
+
 def allowed(request, permission):
-    if permission == "console":
-        # Commands on the box are named people only, not a role.
-        return request[USER]["username"].lower() in request.app[CONFIG].console_users
+    if named(request):
+        return True
     return auth.allows(request[USER]["role"], request.get(GRANTS, set()), permission)
 
 
@@ -2303,7 +2308,72 @@ async def manage_index(request):
     require(request, "files")
     root = request.app[FILES_ROOT]
     folders = [{"name": name, "running": files.amp_running(root / name)} for name in files.instances(root)]
-    return render(request, "manage_index.html", folders=folders, root=root, has_amp=bool(request.app[AMP]))
+    return render(request, "manage_index.html", folders=folders, root=root, has_amp=bool(request.app[AMP]),
+                  name_rule=files.INSTANCE_NAME.pattern)
+
+
+async def manage_create(request):
+    """A new game server, made from the same game template as one that already exists."""
+    require(request, "files")
+    root = request.app[FILES_ROOT]
+    form = await request.post()
+    name, friendly = form.get("name", "").strip(), form.get("friendly", "").strip() or form.get("name", "").strip()
+    source = form.get("copy_from", "")
+    try:
+        if not request.app[AMP]:
+            raise AmpError("The panel has no AMP login yet. Add it under Settings → AMP login.")
+        if not files.INSTANCE_NAME.match(name):
+            raise files.FileError("Server names are 3 to 31 letters and numbers, starting with a letter, like Arland02.")
+        if (root / name).exists():
+            raise files.FileError(f"There's already a server called {name}.")
+        base, _ = files.resolve(root, source)
+        provision = files.provision_from(base)
+        port = max(files.used_ports(root) | {8080}) + 1
+        await request.app[AMP].create_instance(name, friendly[:60], port, provision)
+    except (AmpError, files.FileError, OSError) as exc:
+        audit(request, "create server", name, detail=str(exc), ok=False)
+        flash(request, f"{name or 'The server'} wasn't made: {exc}", "error")
+        raise web.HTTPFound("/manage")
+    audit(request, "create server", name, detail=f"like {source}, AMP port {port}")
+    flash(request, f"Making {name}. AMP is setting it up and downloading Arma Reforger, which takes a few minutes. "
+                   "Its settings start empty: fill them in under its Settings tab.")
+    raise web.HTTPFound("/manage")
+
+
+async def manage_delete(request):
+    """Delete a whole server, carefully: named accounts only, its name typed out,
+    stopped first and backed up before AMP removes it."""
+    require(request, "delete_servers")
+    inst = request.match_info["inst"]
+    base, _ = server_folder(request)
+    form = await request.post()
+    back = f"/manage/{inst}"
+    if form.get("confirm", "") != inst:
+        flash(request, f"Type {inst} exactly to delete it. Nothing was deleted.", "error")
+        raise web.HTTPFound(back)
+    if not request.app[AMP]:
+        flash(request, "The panel has no AMP login yet, so it can't delete servers.", "error")
+        raise web.HTTPFound(back)
+    try:
+        if files.amp_running(base):
+            await request.app[AMP].instance_power(inst, "stop")
+            for _ in range(60):
+                await asyncio.sleep(1)
+                if not files.amp_running(base):
+                    break
+            else:
+                raise AmpError(f"{inst} didn't stop within a minute, so it wasn't deleted.")
+        saved, size = await asyncio.to_thread(files.backup, request.app[FILES_ROOT], base)
+        audit(request, "backed up server", inst, detail=f"{saved} ({size // 1024 // 1024} MB)")
+        await request.app[AMP].delete_instance(inst)
+    except (AmpError, OSError) as exc:
+        audit(request, "delete server", inst, detail=str(exc), ok=False)
+        flash(request, f"{inst} wasn't deleted: {exc}", "error")
+        raise web.HTTPFound(back)
+    audit(request, "delete server", inst, detail=f"backup {saved}")
+    alert(request, f"Server deleted: {inst}", f"By {request[USER]['username']}. Backup: {saved}", colour=RED)
+    flash(request, f"Deleted {inst}. A backup of its settings, saves and logs is at {saved}.")
+    raise web.HTTPFound("/manage")
 
 
 async def manage_overview(request):
@@ -2319,7 +2389,8 @@ async def manage_overview(request):
     metrics = [{"name": name, **m} for name, m in (status.get("Metrics") or {}).items() if isinstance(m, dict)]
     return render(request, "manage_overview.html", inst=inst, running=running, error=error, metrics=metrics,
                   state=AMP_STATES.get(status.get("State"), "Unknown") if status else "", uptime=status.get("Uptime", ""),
-                  has_amp=bool(request.app[AMP]), tabs=manage_tabs(request, inst, "overview"))
+                  has_amp=bool(request.app[AMP]), can_delete=allowed(request, "delete_servers"),
+                  tabs=manage_tabs(request, inst, "overview"))
 
 
 async def manage_power(request):
@@ -3186,14 +3257,14 @@ async def audit_page(request):
 
 def users_view(request, created=None):
     db = request.app[DB]
+    owners = {u["id"] for u in db.users() if named(request, u)}
     return render(request, "users.html", rows=db.users(), roles=assignable_roles(request), created=created,
-                  grants=db.all_grants(), access_summary=access_summary)
+                  grants=db.all_grants(), access_summary=access_summary, owners=owners, i_own=named(request))
 
 
 def assignable_roles(request):
-    """Only a manager can make a manager."""
-    manager = request[USER]["role"] == "manager"
-    return [r for r in auth.ROLES if manager or r != "manager"]
+    """Only the panel's owners can make a manager."""
+    return [r for r in auth.ROLES if named(request) or r != "manager"]
 
 
 def access_summary(grants):
@@ -3215,8 +3286,10 @@ async def access_page(request):
     require(request, "users")
     db = request.app[DB]
     target = db.user(int(request.match_info["user_id"]))
-    if target is None or target["role"] in auth.TOP:
+    if target is None or target["role"] == "owner" or named(request, target):
         raise web.HTTPFound("/users")
+    if target["role"] == "manager" and not named(request):
+        raise web.HTTPForbidden(text="Only the panel's owners can change a manager's access.")
     mine = db.grants(target["id"])
     return render(request, "user_access.html", target=target, mine=mine, grant_list=auth.GRANTS,
                   discord_pages=DISCORD_PAGES, role_can=auth.can,
@@ -3249,8 +3322,8 @@ async def change_user(request):
     target = db.user(int(request.match_info["user_id"]))
     if target is None:
         raise web.HTTPNotFound(text="No such account.")
-    if target["role"] == "manager" and request[USER]["role"] != "manager":
-        raise web.HTTPForbidden(text="Only a manager can change a manager's account.")
+    if (target["role"] == "manager" or named(request, target)) and not named(request):
+        raise web.HTTPForbidden(text="Only the panel's owners can change a manager's account.")
     form = await request.post()
     action = form.get("action", "")
     is_owner = target["role"] in auth.TOP and not target["disabled"]
@@ -3415,7 +3488,9 @@ def create_app(config: PanelConfig, db: PanelDB | None = None, manager: ServerMa
     app.router.add_route("GET", "/settings/amp", amp_login_page)
     app.router.add_post("/settings/amp", amp_login_page)
     app.router.add_get("/manage", manage_index)
+    app.router.add_post("/manage/new", manage_create)
     app.router.add_get("/manage/{inst}", manage_overview)
+    app.router.add_post("/manage/{inst}/delete", manage_delete)
     app.router.add_post("/manage/{inst}/power/{action}", manage_power)
     app.router.add_route("GET", "/manage/{inst}/console", manage_console)
     app.router.add_get("/manage/{inst}/console.txt", manage_console)
