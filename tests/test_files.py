@@ -194,14 +194,35 @@ class FileManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_amp_instances_start_and_stop_from_the_panel(self):
         amp = mock.Mock()
         amp.instance_power = mock.AsyncMock()
+        amp.instances = mock.AsyncMock(return_value={"Plus01": {"FriendlyName": "OYB Plus"}})
         self.app[AMP] = amp
+        (self.root / "Plus01" / "GenericModule.kvp").write_text(
+            'App.AppSettings={"name":"[OYB] Plus | Modded","$MaxUsers":"64","mods":"{\\"modId\\":\\"60C4CE4888FF4621\\"}",'
+            '"admins":"\\"a0b1c2d3-e4f5-4a6b-8c7d-9e0f1a2b3c4d\\""}')
         token = await self.login("chief")
         with mock.patch("panel.files.amp_running", return_value=False):
             page = await (await self.client.get("/manage")).text()
         self.assertIn('action="/instances/Plus01/start"', page)
+        for words in (">OYB Plus</a>", "[OYB] Plus | Modded", "<span> / 64</span>", "AMP off", "Servers running"):
+            self.assertIn(words, page)
         await self.client.post("/instances/Plus01/start", data={"csrf": token})
         amp.instance_power.assert_awaited_once_with("Plus01", "start")
         self.assertEqual((await self.client.post("/instances/..%2fx/start", data={"csrf": token})).status, 404)
+
+    def test_a_running_game_reports_its_memory_and_uptime(self):
+        proc = Path(tempfile.mkdtemp())
+        (proc / "uptime").write_text("10000.0 1.0\n")
+        game = proc / "321"
+        game.mkdir()
+        os.symlink(f"{self.root}/Plus01/arma-reforger/1874900/ArmaReforgerServer", game / "exe")
+        ticks = os.sysconf("SC_CLK_TCK")
+        started = 10000 - 3600                                      # an hour ago, in seconds since boot
+        (game / "stat").write_text("321 (ArmaReforgerSer) S " + " ".join(["0"] * 18) + f" {started * ticks} 0 0\n")
+        (game / "status").write_text("Name:\tArmaReforgerSer\nVmRSS:\t5242880 kB\n")
+        found = files.game_process(self.root / "Plus01", proc)
+        self.assertEqual(found["memory"], 5 * 1024 ** 3)
+        self.assertAlmostEqual(found["up"], 3600, delta=5)
+        self.assertIsNone(files.game_process(self.root / "Other", proc))
 
     def test_amp_counts_as_running_when_its_program_is_in_the_folder(self):
         proc = Path(tempfile.mkdtemp())
@@ -304,7 +325,9 @@ class FileManagerTests(unittest.IsolatedAsyncioTestCase):
             "Meta.MetaConfigManifest=arma-reforgermetaconfig.json\nMeta.ConfigRoot=arma-reforger.kvp\n"
             "Meta.Author=Greelan\n"
             'App.AppSettings={"name":"OYB Plus","scenarioId":"{ECC}","password":"old","adminPassword":"old",'
-            '"$MaxUsers":"64","mods":"{\\"modId\\":\\"60C4CE4888FF4621\\"}","admins":"\\"a\\"","maxFPS":"120"}')
+            '"$MaxUsers":"64","mods":"{\\"modId\\":\\"60C4CE4888FF4621\\"}","admins":"\\"a\\"","maxFPS":"120",'
+            '"missionHeader":"\\"m_fXpMultiplier\\": 3,\\n\\"m_iStartingHQSupplies\\": 1200,\\n\\"m_bCustomBaseWhitelist\\": 1",'
+            '"CustomServerArgs":"-playerLimits=US:54,USSR:54,FIA:20 -fXpMultiplier:3,-noThrow"}')
         (self.root / "Plus01" / "configmanifest.json").write_text(json.dumps([
             {"FieldName": "scenarioId", "EnumValues": {"{ECC}": "Conflict - Everon", "{ARL}": "Conflict - Arland"}}]))
         (self.root / "Plus01" / "AMPConfig.conf").write_text("Webserver.Port=8084\n")
@@ -320,16 +343,19 @@ class FileManagerTests(unittest.IsolatedAsyncioTestCase):
         page = await (await self.client.get("/manage/new")).text()
         self.assertIn("Conflict - Arland", page)
         self.assertIn('value="64"', page)
+        self.assertIn('name="xp" value="3"', page)                    # read from the copied server's header
+        self.assertIn('name="fia" value="20"', page)
         await self.client.post("/manage/new", data={"csrf": token, "name": "bad name", "copy_from": "Plus01",
                                                      "server_name": "X"})
         amp.create_instance.assert_not_awaited()
         real = web_module.finish_setup
-        with mock.patch("panel.web.finish_setup", new=lambda app, name, settings, start: real(
-                app, name, settings, start, pause=0.001)):
+        with mock.patch("panel.web.finish_setup", new=lambda app, name, settings, start, **more: real(
+                app, name, settings, start, pause=0.001, **more)):
             await self.client.post("/manage/new", data={
                 "csrf": token, "name": "Arland02", "friendly": "Arland 2", "copy_from": "Plus01", "copy": "1",
                 "copy_mods": "1", "server_name": "OYB Arland", "scenario": "{ARL}", "players": "100",
-                "admin_password": "newadmin1", "visible": "1", "start": "1"})
+                "admin_password": "newadmin1", "visible": "1", "start": "1", "xp": "1.5", "supplies": "2000",
+                "us": "60", "ussr": "60", "fia": "8", "fps": "90", "quick_stop": "1"})
             for _ in range(200):
                 if self.app[web_module.SETUPS]["Arland02"]["done"]:
                     break
@@ -339,17 +365,24 @@ class FileManagerTests(unittest.IsolatedAsyncioTestCase):
             "GenericModule.Meta.MetaConfigManifest": "arma-reforgermetaconfig.json",
             "GenericModule.Meta.ConfigRoot": "arma-reforger.kvp"})
         self.assertTrue(self.app[web_module.SETUPS]["Arland02"]["done"], self.app[web_module.SETUPS]["Arland02"])
-        applied = amp.set_configs.await_args.args[1]
+        applied = amp.set_configs.await_args_list[0].args[1]
         self.assertEqual(applied["Meta.GenericModule.name"], "OYB Arland")
         self.assertEqual(applied["Meta.GenericModule.scenarioId"], "{ARL}")
         self.assertEqual(applied["Meta.GenericModule.$MaxUsers"], "100")
-        self.assertEqual(applied["Meta.GenericModule.maxFPS"], "120")                 # copied
         self.assertEqual(applied["Meta.GenericModule.adminPassword"], "newadmin1")
         self.assertNotIn("Meta.GenericModule.password", applied)                       # never copied
         self.assertEqual(applied["Meta.GenericModule.admins"], "")                     # admins not ticked
         self.assertIn("60C4CE4888FF4621", applied["Meta.GenericModule.mods"])
         self.assertEqual((applied["Meta.GenericModule.visible"], applied["Meta.GenericModule.crossPlatform"]),
                          ("true", "false"))
+        header = applied["Meta.GenericModule.missionHeader"]
+        self.assertIn('"m_fXpMultiplier": 1.5', header)
+        self.assertIn('"m_iStartingHQSupplies": 2000', header)
+        self.assertIn('"m_bCustomBaseWhitelist": 1', header)                          # the rest kept
+        self.assertEqual(applied["Meta.GenericModule.CustomServerArgs"],
+                         "-playerLimits=US:60,USSR:60,FIA:8 -fXpMultiplier=1.5,-noThrow")
+        self.assertEqual(applied["Meta.GenericModule.maxFPS"], "90")
+        amp.set_configs.assert_any_await(instance, {"GenericModule.App.ExitTimeout": "5"})
         amp.power.assert_awaited_once_with(instance, "start")
         self.assertEqual(self.app[web_module.SETUPS]["Arland02"]["step"], "Started")
         self.assertIn("Setting up Arland02", await (await self.client.get("/manage")).text())
@@ -405,6 +438,14 @@ class AmpLoginTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_manager_adds_the_amp_login_from_the_panel(self):
         await self.client.post("/login", data={"username": "boss", "password": "boss-password"})
         self.assertEqual((await self.client.get("/settings/amp")).status, 403)
+        await self.client.post("/login", data={"username": "burd", "password": "burd-password"})
+        page = await (await self.client.get("/settings/amp")).text()
+        self.db.add_user("manager2", auth.hash_password("manager2-password"), "manager")
+        self.db.set_grants(self.db.user_by_name("manager2")["id"], {"console"})
+        await self.client.post("/logout", data={"csrf": re.search(r'name="csrf" value="([^"]+)"', page).group(1)})
+        await self.client.post("/login", data={"username": "manager2", "password": "manager2-password"})
+        self.assertEqual((await self.client.get("/settings/amp")).status, 403)   # even with the box console ticked
+        await self.client.post("/logout", data={"csrf": re.search(r'name="csrf" value="([^"]+)"', await (await self.client.get("/")).text()).group(1)})
         await self.client.post("/login", data={"username": "burd", "password": "burd-password"})
         page = await (await self.client.get("/settings/amp")).text()
         self.assertIn("Not set up", page)

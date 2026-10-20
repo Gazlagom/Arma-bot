@@ -284,6 +284,32 @@ def latest_console(base, tail=64 * 1024):
     return path, text
 
 
+def game_process(base, proc="/proc"):
+    """{pid, memory (bytes), up (seconds)} for this server's running game, or None."""
+    try:
+        boot = time.time() - float(Path(proc, "uptime").read_text().split()[0])
+        ticks = os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError):
+        return None
+    for entry in Path(proc).iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            exe = os.readlink(entry / "exe")
+        except OSError:
+            continue
+        if not (exe.startswith(f"{base}/") and Path(exe).name.startswith("ArmaReforgerServer")):
+            continue
+        try:
+            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+            rss = next((int(line.split()[1]) * 1024 for line in (entry / "status").read_text().splitlines()
+                        if line.startswith("VmRSS:")), 0)
+        except (OSError, ValueError, IndexError):
+            continue
+        return {"pid": int(entry.name), "memory": rss, "up": max(0, int(time.time() - boot - int(fields[19]) / ticks))}
+    return None
+
+
 KVP = "GenericModule.kvp"
 MANIFEST = "configmanifest.json"
 SETTINGS_LINE = "App.AppSettings="
@@ -306,6 +332,47 @@ def game_settings(base):
             found = json.loads(line[len(SETTINGS_LINE):])
             return {str(k): v if isinstance(v, str) else json.dumps(v) for k, v in found.items()}
     return {}
+
+
+HEADER_KEYS = {"xp": "m_fXpMultiplier", "supplies": "m_iStartingHQSupplies", "points": "m_iControlPointsCap",
+               "victory": "m_fVictoryTimeout"}
+
+
+def header_get(header, key):
+    """One value from a mission header ("m_fXpMultiplier": 3, ...), or ""."""
+    found = re.search(r'"%s"\s*:\s*"?([^",\n]*)' % re.escape(key), header or "")
+    return found.group(1).strip() if found else ""
+
+
+def header_set(header, key, value):
+    """The mission header with one value changed, or added at the top when it's not there."""
+    header = header or ""
+    pattern = r'("%s"\s*:\s*)"?[^",\n]*"?' % re.escape(key)
+    if re.search(pattern, header):
+        return re.sub(pattern, lambda m: m.group(1) + value, header, count=1)
+    body = header.strip()
+    return f'"{key}": {value}' + (",\n" + body if body else "")
+
+
+def args_get(args):
+    """(US, USSR, FIA player limits, XP multiplier) from the extra startup line."""
+    limits = dict(re.findall(r"(US|USSR|FIA):(\d+)", (re.search(r"-playerLimits[=:\s]+(\S+)", args or "") or [None, ""])[1]))
+    xp = re.search(r"-fXpMultiplier[=:\s]+([0-9.]+)", args or "")
+    return limits.get("US", ""), limits.get("USSR", ""), limits.get("FIA", ""), xp.group(1) if xp else ""
+
+
+def args_set(args, us, ussr, fia, xp):
+    """The extra startup line with player limits and XP set, everything else kept."""
+    args = args or ""
+    if us or ussr or fia:
+        limits = f"-playerLimits=US:{us or 0},USSR:{ussr or 0},FIA:{fia or 0}"
+        args = re.sub(r"-playerLimits[=:\s]+\S+", limits, args) if "-playerLimits" in args else f"{limits} {args}".strip()
+    if xp:
+        if re.search(r"-fXpMultiplier[=:\s]+[0-9.]+", args):
+            args = re.sub(r"-fXpMultiplier[=:\s]+[0-9.]+", f"-fXpMultiplier={xp}", args)
+        else:
+            args = f"{args} -fXpMultiplier={xp}".strip()
+    return args
 
 
 def scenarios(base):

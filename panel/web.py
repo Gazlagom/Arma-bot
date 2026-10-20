@@ -2164,7 +2164,7 @@ SETTINGS_PERMISSIONS = ("sus", "game_admins", "users", "cards", "website", "mort
 async def settings_page(request):
     if not any(allowed(request, p) for p in SETTINGS_PERMISSIONS):
         raise web.HTTPForbidden(text="You do not have permission for that.")
-    return render(request, "settings.html")
+    return render(request, "settings.html", is_owner=named(request))
 
 
 async def data_page(request):
@@ -2303,19 +2303,78 @@ async def files_index(request):
     raise web.HTTPFound("/manage")
 
 
+def manage_card(request, root, name, amp_info, panel_states):
+    """What one server's card on the Server manager shows, all read from the box."""
+    base = root / name
+    try:
+        settings = files.game_settings(base)
+    except (OSError, ValueError):
+        settings = {}
+    game = files.game_process(base)
+    live = panel_states.get(name)
+    info = amp_info.get(name) or {}
+    return {"name": name, "running": files.amp_running(base), "game": game,
+            "friendly": info.get("FriendlyName") or "", "server_name": settings.get("name", ""),
+            "mods": len(files.parse_mods(settings.get("mods", ""))), "admins": len(parse_ids(settings.get("admins", ""))),
+            "max": settings.get("$MaxUsers", ""), "players": len(live.players) if live and live.online else None,
+            "map": (live.query.get("map") if live and live.online else "") or "",
+            "panel_id": live.config.id if live else ""}
+
+
 async def manage_index(request):
     """Every AMP server on the box, like AMP's Instances page."""
     require(request, "files")
     root = request.app[FILES_ROOT]
-    folders = [{"name": name, "running": files.amp_running(root / name)} for name in files.instances(root)]
+    amp_info = {}
+    if request.app[AMP]:
+        try:
+            amp_info = await request.app[AMP].instances()
+        except AmpError:
+            pass
+    panel_states = {(st.config.amp_instance or amp_instance_name(st.config.log_dir)): st
+                    for st in request.app[MANAGER].states.values()}
+    folders = [manage_card(request, root, name, amp_info, panel_states) for name in files.instances(root)]
+    totals = {"running": sum(1 for f in folders if f["game"]), "players": sum(f["players"] or 0 for f in folders),
+              "memory": sum(f["game"]["memory"] for f in folders if f["game"])}
     return render(request, "manage_index.html", folders=folders, root=root, has_amp=bool(request.app[AMP]),
-                  setups=sorted(request.app[SETUPS].items(), key=lambda item: -item[1]["at"]))
+                  totals=totals, setups=sorted(request.app[SETUPS].items(), key=lambda item: -item[1]["at"]))
 
 
 SETUPS = web.AppKey("setups", dict)
 # What a new server copies from the one it's based on is everything in its game
 # settings except these, which are this server's own.
 OWN_SETTINGS = ("name", "password", "adminPassword", "publicAddress", "ManualPublicIP")
+
+
+# Every setting the wizard asks for: (form field, game setting, kind). Numbers are checked.
+WIZARD_FIELDS = (
+    ("server_name", "name", "text"), ("scenario", "scenarioId", "text"), ("players", "$MaxUsers", "int"),
+    ("queue", "maxSize", "int"), ("fps", "maxFPS", "int"), ("view", "serverMaxViewDistance", "int"),
+    ("net_view", "networkViewDistance", "int"), ("grass", "serverMinGrassDistance", "int"), ("ai", "aiLimit", "int"),
+    ("navmesh", "DisabledNavmeshComponents", "text"), ("freeze", "freezeCheck", "int"),
+    ("autosave", "autoSaveInterval", "int"), ("retention", "saveRetention", "int"),
+)
+WIZARD_SWITCHES = (("visible", "visible"), ("crossPlatform", "crossPlatform"),
+                   ("cross_radio", "VONCanTransmitCrossFaction"), ("load_save", "loadSessionSave2"))
+
+
+def wizard_defaults(current):
+    """What the wizard starts with: the copied server's values, or what our servers use."""
+    header, args = current.get("missionHeader", ""), current.get("CustomServerArgs", "")
+    us, ussr, fia, xp_arg = files.args_get(args)
+    ours = {"$MaxUsers": "128", "maxSize": "50", "maxFPS": "120", "serverMaxViewDistance": "1800",
+            "networkViewDistance": "800", "serverMinGrassDistance": "50", "aiLimit": "250",
+            "DisabledNavmeshComponents": '"Soldiers","BTRlike"', "freezeCheck": "45", "autoSaveInterval": "10",
+            "saveRetention": "10", "visible": "true", "crossPlatform": "true", "VONCanTransmitCrossFaction": "true",
+            "loadSessionSave2": "true"}
+    found = {key: current.get(key) or ours.get(key, "") for _, key, _ in WIZARD_FIELDS}
+    found.update({key: str(current.get(key, ours.get(key, "false"))).lower() for _, key in WIZARD_SWITCHES})
+    found.update(xp=files.header_get(header, "m_fXpMultiplier") or xp_arg or "1.5", us=us or "54", ussr=ussr or "54",
+                 fia=fia or "20", supplies=files.header_get(header, "m_iStartingHQSupplies") or "1200",
+                 points=files.header_get(header, "m_iControlPointsCap") or "6",
+                 victory=files.header_get(header, "m_fVictoryTimeout") or "780",
+                 header=header, crash=str(current.get("freezeCheckMode", "crash")) == "crash")
+    return found
 
 
 async def manage_new_page(request):
@@ -2327,24 +2386,45 @@ async def manage_new_page(request):
     source = request.query.get("from") if request.query.get("from") in folders else folders[0]
     base, _ = files.resolve(root, source)
     current = files.game_settings(base)
-    return render(request, "manage_new.html", folders=folders, source=source, current=current,
-                  scenarios=files.scenarios(base), admin_password=secrets.token_urlsafe(12).replace("-", "x").replace("_", "y"),
+    return render(request, "manage_new.html", folders=folders, source=source, v=wizard_defaults(current),
+                  scenarios=files.scenarios(base), scenario=current.get("scenarioId", ""),
+                  admin_password=secrets.token_urlsafe(12).replace("-", "x").replace("_", "y"),
                   has_amp=bool(request.app[AMP]))
 
 
 def new_server_settings(source_settings, form):
-    """The game settings a new server is given: its source's, then what was typed in."""
+    """The game settings a new server is given: its source's (if copied), then
+    everything the wizard asked, mission header and startup line included."""
     settings = {k: v for k, v in source_settings.items() if k not in OWN_SETTINGS} if form.get("copy") else {}
     if form.get("copy") and not form.get("copy_mods"):
         settings["mods"] = ""
     if form.get("copy") and not form.get("copy_admins"):
         settings["admins"] = ""
-    typed = {"name": form.get("server_name", "").strip()[:100], "scenarioId": form.get("scenario", ""),
-             "$MaxUsers": form.get("players", "").strip(), "password": form.get("password", ""),
-             "adminPassword": form.get("admin_password", "")}
+    for field, key, kind in WIZARD_FIELDS:
+        value = form.get(field, "").strip()
+        if not value:
+            continue
+        if kind == "int" and not re.fullmatch(r"-?\d{1,6}", value):
+            raise files.FileError(f"{field.replace('_', ' ').capitalize()} has to be a whole number.")
+        settings[key] = value[:100] if key == "name" else value
+    for field, key in WIZARD_SWITCHES:
+        settings[key] = "true" if form.get(field) else "false"
+    settings["freezeCheckMode"] = "crash" if form.get("crash") else ""
+    if settings.get("DisabledNavmeshComponents"):
+        settings["disableNavmeshStreaming12"] = '"disableNavmeshStreaming":[ {{DisabledNavmeshComponents}} ],'
+    for field in ("xp", "supplies", "points", "victory", "us", "ussr", "fia"):
+        if form.get(field, "").strip() and not re.fullmatch(r"\d{1,6}(\.\d{1,3})?", form.get(field, "").strip()):
+            raise files.FileError(f"{field.upper() if len(field) < 5 else field.capitalize()} has to be a number.")
+    header = form.get("header", "") if form.get("header", "").strip() else settings.get("missionHeader", "")
+    for field, key in files.HEADER_KEYS.items():
+        if form.get(field, "").strip():
+            header = files.header_set(header, key, form.get(field).strip())
+    settings["missionHeader"] = header
+    settings["CustomServerArgs"] = files.args_set(settings.get("CustomServerArgs", ""), form.get("us", "").strip(),
+                                                  form.get("ussr", "").strip(), form.get("fia", "").strip(),
+                                                  form.get("xp", "").strip())
+    typed = {"password": form.get("password", ""), "adminPassword": form.get("admin_password", "")}
     settings.update({k: v for k, v in typed.items() if v})
-    for key in ("crossPlatform", "visible"):
-        settings[key] = "true" if form.get(key) else "false"
     return settings
 
 
@@ -2384,7 +2464,8 @@ async def manage_create(request):
     audit(request, "create server", name, detail=f"like {source}, AMP port {port}")
     request.app[SETUPS][name] = {"step": "Created in AMP, waiting for it to start up", "done": False, "error": "",
                                  "at": now(), "by": request[USER]["username"]}
-    task = asyncio.create_task(finish_setup(request.app, name, settings, bool(form.get("start"))))
+    task = asyncio.create_task(finish_setup(request.app, name, settings, bool(form.get("start")),
+                                            quick_stop=bool(form.get("quick_stop"))))
     request.app[SETUP_TASKS].add(task)
     task.add_done_callback(request.app[SETUP_TASKS].discard)
     flash(request, f"Making {name}. Its progress shows below; you can leave this page.")
@@ -2395,7 +2476,7 @@ SETUP_TASKS = web.AppKey("setup_tasks", set)
 BUSY_STATES = (5, 7, 10, 70, 75)
 
 
-async def finish_setup(app, name, settings, start, pause=5, patience=600, download=3600):
+async def finish_setup(app, name, settings, start, pause=5, patience=600, download=3600, quick_stop=False):
     """Wait for the new instance to answer, give it its settings, wait out the game
     download and start it. Every step is written where the Server manager shows it."""
     progress = app[SETUPS][name]
@@ -2421,6 +2502,9 @@ async def finish_setup(app, name, settings, start, pause=5, patience=600, downlo
         refused = await amp.set_configs(instance, {GAME_NODE + k: v for k, v in settings.items()})
         if refused:
             step("Settings applied, except " + ", ".join(n.rsplit(".", 1)[-1] for n in refused))
+        if quick_stop:
+            # How long AMP waits for the game to close before forcing it (30 by default, 5 on ours).
+            await amp.set_configs(instance, {"GenericModule.App.ExitTimeout": "5"})
         if not start:
             step("Ready. Press Start on its page when you want it running.", done=True)
             return
@@ -2730,8 +2814,9 @@ async def file_action(request):
 
 
 async def amp_login_page(request):
-    """Give the panel its AMP login from here, so nobody needs a shell on the box for it."""
-    require(request, "console")
+    """Give the panel its AMP login from here. Only the panel's owners: it's the key to all of AMP."""
+    if not named(request):
+        raise web.HTTPForbidden(text="Only the panel's owners can change the AMP login.")
     amp, seen, error = request.app[AMP], [], ""
     if request.method == "POST":
         form = await request.post()
