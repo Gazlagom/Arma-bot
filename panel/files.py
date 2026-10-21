@@ -254,6 +254,30 @@ def backup(root, base):
     return target, target.stat().st_size
 
 
+SAVE_BACKUPS = "save-backups"
+
+
+def save_folder(base):
+    """The game's .save folder for this server, or None when it has no save yet."""
+    found = sorted(Path(base).glob("arma-reforger/*/*/profile/.save"))
+    return found[0] if found else None
+
+
+def new_game(root, base):
+    """Put this server's save aside so its next start is a fresh game. The save is moved
+    to a folder of its own, not deleted. Returns where it went, or None if there was none."""
+    save = save_folder(base)
+    if save is None:
+        return None
+    folder = Path(root).parent / SAVE_BACKUPS / Path(base).name / time.strftime("%Y-%m-%d_%H-%M-%S")
+    folder.mkdir(parents=True)
+    for made in (folder.parent.parent, folder.parent, folder):
+        hand_over(made)
+    target = folder / save.name
+    shutil.move(str(save), str(target))
+    return target
+
+
 def shortcuts(base):
     """[(label, path)] to the files people open most, where this server has them."""
     found = []
@@ -384,6 +408,37 @@ def scenarios(base):
     except (OSError, ValueError):
         pass
     return {}
+
+
+_MAPS = {}
+
+
+def map_name(base):
+    """The island a server is set to play ("Conflict - Everon" gives "Everon"), from its
+    saved scenario. Empty when it has none, or one the manifest doesn't name."""
+    try:
+        stamp = (Path(base) / KVP).stat().st_mtime
+    except OSError:
+        return ""
+    hit = _MAPS.get(str(base))
+    if hit and hit[0] == stamp:
+        return hit[1]
+    try:
+        name = scenarios(Path(base)).get(game_settings(Path(base)).get("scenarioId", ""), "")
+    except (OSError, ValueError):
+        name = ""
+    island = name.rsplit(" - ", 1)[-1].strip() if name else ""
+    _MAPS[str(base)] = (stamp, island)
+    return island
+
+
+def server_map(config):
+    """The map for a panel server, found through the AMP instance its logs live in."""
+    parts = [p for p in str(config.log_dir).split("/") if p]
+    name = config.amp_instance
+    if not name and "instances" in parts and parts.index("instances") + 1 < len(parts):
+        name = parts[parts.index("instances") + 1]
+    return map_name(instances_root([config]) / name) if name else ""
 
 
 def kvp_mods(base):

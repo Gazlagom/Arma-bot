@@ -2,6 +2,7 @@ import json
 import os
 import re
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -386,6 +387,85 @@ class FileManagerTests(unittest.IsolatedAsyncioTestCase):
         amp.power.assert_awaited_once_with(instance, "start")
         self.assertEqual(self.app[web_module.SETUPS]["Arland02"]["step"], "Started")
         self.assertIn("Setting up Arland02", await (await self.client.get("/manage")).text())
+
+    async def test_ticking_several_mods_adds_them_in_one_go(self):
+        token = await self.login("chief")
+        picks = [("pick", "6A263A54663F2EDB:AdvancedFlashBangSystem"), ("pick", "not-an-id:Nope"),
+                 ("pick", "6a843b0ec5b8bd3b:AKMRISRail"), ("pick", "6A263A54663F2EDB:AdvancedFlashBangSystem")]
+        await self.client.post("/mods/Plus01", data=[("csrf", token), ("action", "add_many")] + picks)
+        mods = files.parse_mods(files.kvp_mods(self.root / "Plus01"))
+        self.assertEqual([(m["modId"], m["name"]) for m in mods],
+                         [("6A263A54663F2EDB", "AdvancedFlashBangSystem"), ("6A843B0EC5B8BD3B", "AKMRISRail")])
+        self.assertTrue(self.db.one("SELECT 1 FROM audit WHERE action = 'add mods'"))
+        again = await self.client.post("/mods/Plus01", data=[("csrf", token), ("action", "add_many")] + picks[:1])
+        self.assertIn("1 already on the list", await again.text())
+        self.assertEqual(len(files.parse_mods(files.kvp_mods(self.root / "Plus01"))), 2)
+        empty = await self.client.post("/mods/Plus01", data=[("csrf", token), ("action", "add_many")])
+        self.assertIn("Tick at least one mod", await empty.text())
+
+    async def test_a_servers_map_comes_from_the_scenario_it_is_set_to_play(self):
+        (self.root / "Plus01" / "GenericModule.kvp").write_text(
+            'App.AppSettings={"name":"OYB Plus","scenarioId":"{ARL}"}')
+        (self.root / "Plus01" / "configmanifest.json").write_text(json.dumps([
+            {"FieldName": "scenarioId", "EnumValues": {"{ECC}": "Conflict - Everon", "{ARL}": "Game Master - Arland"}}]))
+        self.assertEqual(files.map_name(self.root / "Plus01"), "Arland")
+        config = ServerConfig("plus", "Plus", log_dir=f"{self.root}/Plus01/arma-reforger/1874900/AReforgerMaster/logs")
+        self.assertEqual(files.server_map(config), "Arland")
+        by_name = ServerConfig("plus", "Plus", amp_instance="Plus01", log_dir=f"{self.root}/Elsewhere/logs")
+        self.assertEqual(files.server_map(by_name), "Arland")
+        (self.root / "Plus01" / "GenericModule.kvp").write_text('App.AppSettings={"scenarioId":"{ECC}"}')
+        os.utime(self.root / "Plus01" / "GenericModule.kvp", (time.time() + 5, time.time() + 5))
+        self.assertEqual(files.map_name(self.root / "Plus01"), "Everon")
+        self.assertEqual(files.map_name(self.root / "Missing"), "")
+        self.assertEqual(files.server_map(ServerConfig("x", "X")), "")
+
+    async def test_new_game_puts_the_save_aside_and_starts_the_server_again(self):
+        profile = self.root / "Plus01" / "arma-reforger" / "1874900" / "AReforgerMaster" / "profile"
+        (profile / ".save").mkdir(parents=True)
+        (profile / ".save" / "world.dat").write_text("progress")
+        trash = self.root / "Plus01" / "arma-reforger" / "1874900" / ".trash" / "AReforgerMaster" / "profile" / ".save.1"
+        trash.mkdir(parents=True)
+        amp = mock.Mock()
+        amp.instance_power = mock.AsyncMock()
+        self.app[AMP] = amp
+        self.db.add_user("mod", auth.hash_password("mod-password"), "moderator")
+        await self.client.post("/login", data={"username": "mod", "password": "mod-password"})
+        page = await (await self.client.get("/guide")).text()
+        token = re.search(r'name="csrf" value="([^"]+)"', page).group(1)
+        reply = await self.client.post("/manage/Plus01/newgame", data={"csrf": token})
+        self.assertEqual(reply.status, 403)
+        self.assertTrue((profile / ".save").exists())
+        token = await self.login("chief")
+        with mock.patch("panel.files.amp_running", side_effect=[True, False]):
+            await self.client.post("/manage/Plus01/newgame", data={"csrf": token})
+        self.assertEqual([c.args for c in amp.instance_power.await_args_list],
+                         [("Plus01", "stop"), ("Plus01", "start")])
+        self.assertFalse((profile / ".save").exists())
+        kept = list((self.root.parent / files.SAVE_BACKUPS / "Plus01").glob("*/.save/world.dat"))
+        self.assertEqual([p.read_text() for p in kept], ["progress"])
+        self.assertTrue(trash.exists())
+        self.assertTrue(self.db.one("SELECT 1 FROM audit WHERE action = 'new game'"))
+        self.assertIn("is on a new game", await (await self.client.get("/manage/Plus01")).text())
+
+    async def test_new_game_on_a_stopped_server_does_not_start_it(self):
+        profile = self.root / "Plus01" / "arma-reforger" / "1874900" / "AReforgerMaster" / "profile"
+        (profile / ".save").mkdir(parents=True)
+        amp = mock.Mock()
+        amp.instance_power = mock.AsyncMock()
+        self.app[AMP] = amp
+        token = await self.login("chief")
+        with mock.patch("panel.files.amp_running", return_value=False):
+            await self.client.post("/manage/Plus01/newgame", data={"csrf": token})
+        amp.instance_power.assert_not_awaited()
+        self.assertFalse((profile / ".save").exists())
+
+    async def test_new_game_with_no_save_changes_nothing(self):
+        amp = mock.Mock()
+        amp.instance_power = mock.AsyncMock()
+        self.app[AMP] = amp
+        token = await self.login("chief")
+        await self.client.post("/manage/Plus01/newgame", data={"csrf": token})
+        amp.instance_power.assert_not_awaited()
 
     async def test_deleting_a_server_is_named_people_only_typed_out_and_backed_up_first(self):
         game = self.root / "Plus01" / "arma-reforger" / "1874900"

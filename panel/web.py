@@ -417,8 +417,8 @@ async def dashboard(request):
     live = list(request.app[MANAGER].states.values())
     details = card_details(request.app[DB])
     states = [control_card(s, request.app[PICTURES], details) for s in live]
-    chosen = request.app[MANAGER].states.get(request.query.get("server", "")) \
-        or next((s for s in live if s.online), live[0] if live else None)
+    if request.query.get("server", "") in request.app[MANAGER].states:
+        raise web.HTTPFound(f"/server/{request.query['server']}")
     db = request.app[DB]
     hour = time.localtime().tm_hour
     welcome = {
@@ -428,11 +428,7 @@ async def dashboard(request):
         "bans": len(db.bans()),
         "sus": db.one("SELECT COUNT(*) FROM feed WHERE kind = 'sus' AND at > ?", now() - 86400)[0],
     }
-    extra = {}
-    if chosen:
-        extra = {"chosen": next(c for c in states if c["id"] == chosen.config.id), **server_overview(request, chosen),
-                 "csp": MAP_CSP}
-    return render(request, "dashboard.html", cards=states, welcome=welcome, amp=bool(request.app[AMP]), gb=GB, **extra)
+    return render(request, "dashboard.html", cards=states, welcome=welcome, amp=bool(request.app[AMP]))
 
 
 async def tour_done(request):
@@ -506,7 +502,7 @@ async def guide_page(request):
 async def dashboard_part(request):
     details = card_details(request.app[DB])
     states = [control_card(s, request.app[PICTURES], details) for s in request.app[MANAGER].states.values()]
-    return render(request, "_cards.html", cards=states, amp=bool(request.app[AMP]), chosen_id=request.query.get("server", ""))
+    return render(request, "_cards.html", cards=states, amp=bool(request.app[AMP]))
 
 
 async def server_page(request):
@@ -1234,7 +1230,7 @@ async def players_page(request):
     server = next((st for st in request.app[MANAGER].states.values()
                    if q and q.lower() in (st.config.name.lower(), st.config.id.lower())), None)
     if server:
-        raise web.HTTPFound(f"/?server={server.config.id}")
+        raise web.HTTPFound(f"/server/{server.config.id}")
     rows = [dict(r) for r in request.app[DB].search_players(q, limit=50)]
     if q and re.fullmatch(r"[0-9a-fA-F.:]{3,}", q) and allowed(request, "ips"):
         seen = {r["identity"] for r in rows}
@@ -1604,7 +1600,8 @@ def control_card(state, pictures=None, details=None):
             "description": mine.get("description", ""), "address": mine.get("address", ""),
             "version": q.get("version") or "",
             "count": len(state.players) if state.online else 0, "slots": q.get("slots"),
-            "map": q.get("map"), "ping": q.get("ms"), "unreachable": state.unreachable >= UNREACHABLE_AFTER}
+            "map": q.get("map") or files.server_map(state.config), "ping": q.get("ms"),
+            "unreachable": state.unreachable >= UNREACHABLE_AFTER}
 
 
 def server_overview(request, state):
@@ -2622,6 +2619,45 @@ async def manage_delete(request):
     raise web.HTTPFound("/manage")
 
 
+async def manage_newgame(request):
+    """A new game on one server: stop it, put its save aside (kept, not deleted) and start it again."""
+    require(request, "power")
+    inst = request.match_info["inst"]
+    base, _ = server_folder(request)
+    back = f"/manage/{inst}"
+    if not request.app[AMP]:
+        flash(request, "The panel has no AMP login yet, so it can't restart servers.", "error")
+        raise web.HTTPFound(back)
+    if files.save_folder(base) is None:
+        flash(request, f"{inst} has no save, so it's already on a new game.")
+        raise web.HTTPFound(back)
+    was_running = files.amp_running(base)
+    try:
+        if was_running:
+            await request.app[AMP].instance_power(inst, "stop")
+            for _ in range(90):
+                await asyncio.sleep(1)
+                if not files.amp_running(base):
+                    break
+            else:
+                raise AmpError(f"{inst} didn't stop within 90 seconds, so its save was left alone.")
+        kept = await asyncio.to_thread(files.new_game, request.app[FILES_ROOT], base)
+    except (AmpError, OSError) as exc:
+        audit(request, "new game", inst, detail=str(exc), ok=False)
+        flash(request, f"{inst} wasn't reset: {exc}", "error")
+        raise web.HTTPFound(back)
+    problem = ""
+    if was_running:
+        try:
+            await request.app[AMP].instance_power(inst, "start")
+        except AmpError as exc:
+            problem = f" It didn't start again ({exc}). Start it from here."
+    audit(request, "new game", inst, detail=f"old save kept at {kept}", ok=not problem)
+    alert(request, f"New game: {inst}", f"By {request[USER]['username']}. The old save is kept at {kept}.", colour=GOLD)
+    flash(request, f"{inst} is on a new game. Its old save is kept at {kept}." + problem, "error" if problem else "ok")
+    raise web.HTTPFound(back)
+
+
 async def manage_overview(request):
     require(request, "power")
     inst = request.match_info["inst"]
@@ -3012,12 +3048,58 @@ async def mods_page(request):
                   csp="default-src 'self'; frame-ancestors 'none'; form-action 'self'; img-src 'self' https:")
 
 
+def parse_picks(values):
+    """[(mod id, name)] from the "ID:name" values of ticked mods; anything without a real ID is dropped."""
+    picked = {}
+    for value in values:
+        mod_id, _, name = str(value).partition(":")
+        mod_id = mod_id.strip().upper()
+        if files.MOD_ID.match(mod_id):
+            picked.setdefault(mod_id, " ".join(name.split())[:120] or mod_id)
+    return list(picked.items())[:100]
+
+
+async def add_many_mods(request, inst, base, form):
+    """Put every ticked mod on the server's list in one go."""
+    back = f"/mods/{inst}"
+    picks = parse_picks(form.getall("pick", []))
+    if not picks:
+        flash(request, "Tick at least one mod first.", "error")
+        raise web.HTTPFound(back)
+    added = []
+
+    def change(value):
+        mods = files.parse_mods(value)
+        have = {m["modId"] for m in mods}
+        added.clear()
+        added.extend(pick for pick in picks if pick[0] not in have)
+        return files.format_mods(mods + [{"modId": mod_id, "name": name} for mod_id, name in added])
+
+    try:
+        if files.amp_running(base):
+            await request.app[AMP].change_setting(await amp_instance(request, inst), "mods", change)
+        else:
+            files.set_kvp_mods(base, change)
+    except (AmpError, files.FileError, OSError, ValueError) as exc:
+        audit(request, "add mods", inst, detail=str(exc), ok=False)
+        flash(request, str(exc), "error")
+        raise web.HTTPFound(back)
+    audit(request, "add mods", inst, detail=f"{len(added)}: " + ", ".join(name for _, name in added)[:400])
+    skipped = len(picks) - len(added)
+    flash(request, f"Added {len(added)} mod{'s' if len(added) != 1 else ''}"
+                   + (f" ({skipped} already on the list)" if skipped else "")
+                   + f". They apply when {inst} next starts.")
+    raise web.HTTPFound(back)
+
+
 async def mods_change(request):
     require(request, "mods")
     inst = request.match_info["inst"]
     base, _ = server_folder(request)
     form = await request.post()
     action = form.get("action", "")
+    if action == "add_many":
+        return await add_many_mods(request, inst, base, form)
     mod_id = form.get("mod_id", "").strip().upper()
     name = form.get("name", "").strip()
     version = form.get("version", "").strip()
@@ -3767,6 +3849,7 @@ def create_app(config: PanelConfig, db: PanelDB | None = None, manager: ServerMa
     app.router.add_get("/manage/{inst}", manage_overview)
     app.router.add_post("/manage/{inst}/delete", manage_delete)
     app.router.add_post("/manage/{inst}/power/{action}", manage_power)
+    app.router.add_post("/manage/{inst}/newgame", manage_newgame)
     app.router.add_route("GET", "/manage/{inst}/console", manage_console)
     app.router.add_get("/manage/{inst}/console.txt", manage_console)
     app.router.add_post("/manage/{inst}/console", manage_console)
