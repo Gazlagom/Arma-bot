@@ -45,7 +45,7 @@ p { margin: 0 0 var(--s2); }
 .button.outline:hover, .button.ghost:hover { border-color: var(--red); }
 
 /* header */
-.site-bar { position: sticky; top: 0; z-index: 30; height: var(--bar); background: rgba(9, 9, 11, .98); border-bottom: 1px solid var(--line); }
+.site-bar { position: sticky; top: 0; z-index: 30; height: var(--bar); background: #09090b; border-bottom: 1px solid var(--line); }
 .bar-in { display: flex; align-items: center; gap: 12px; height: 100%; }
 .logo { display: inline-flex; align-items: center; gap: 10px; }
 .logo img { width: 40px; height: 40px; }
@@ -56,9 +56,10 @@ p { margin: 0 0 var(--s2); }
 .bar-discord svg { width: 22px; height: 22px; }
 .menu summary { display: grid; place-items: center; width: 44px; height: 44px; border: 1px solid var(--line); cursor: pointer; list-style: none; }
 .menu summary::-webkit-details-marker { display: none; }
-.menu summary svg { width: 22px; height: 22px; }
+.menu summary svg { display: block; width: 22px; height: 22px; }
+.menu summary span { display: grid; place-items: center; }
 .menu .shut, .menu[open] .open { display: none; }
-.menu[open] .shut { display: inline; }
+.menu[open] .shut { display: grid; }
 .menu[open] summary { border-color: var(--red); }
 .menu-sheet { position: fixed; z-index: 29; inset: var(--bar) 0 0 0; overflow-y: auto; padding: 8px 20px 40px; background: var(--bg);
   display: flex; flex-direction: column; font-family: var(--display); text-transform: uppercase; letter-spacing: .06em; }
@@ -166,7 +167,7 @@ html.menu-open { overflow: hidden; }
 .tools { display: grid; gap: var(--s2); grid-template-columns: 1fr; }
 .tool { display: block; position: relative; padding: 24px; background: var(--panel); border: 1px solid var(--line); transition: border-color .2s; }
 .tool:hover { border-color: var(--red); }
-.tool svg { width: 28px; height: 28px; color: var(--red); margin-bottom: 14px; }
+.tool > svg { width: 28px; height: 28px; color: var(--red); margin-bottom: 14px; }
 .tool h3 { font-size: 1.35rem; margin-bottom: 8px; }
 .tool p { margin: 0; color: var(--muted); font-size: .95rem; }
 .tool p b { color: var(--ink); }
@@ -214,10 +215,10 @@ html.menu-open { overflow: hidden; }
 .lb ~ .note, .pager ~ .note { margin-top: var(--s2); }
 a.inline { color: var(--red); text-decoration: underline; }
 .xp-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); background: var(--panel); }
-.xp-list li { display: grid; grid-template-columns: 96px 1fr; gap: 16px; align-items: baseline; padding: 14px 18px; border-top: 1px solid var(--line-soft); }
+.xp-list li { display: grid; grid-template-columns: 84px 1fr; gap: 16px; align-items: center; padding: 14px 18px; border-top: 1px solid var(--line-soft); }
 .xp-list li:first-child { border-top: 0; }
-.xp-list b { font-family: var(--display); font-size: 1.5rem; color: var(--ink); }
-.xp-list span { color: var(--text); }
+.xp-list b { font-family: var(--display); font-size: 1.5rem; line-height: 1; color: var(--ink); white-space: nowrap; }
+.xp-list span { color: var(--text); line-height: 1.4; }
 .ladder { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; grid-template-columns: 1fr; }
 .rung { position: relative; display: grid; grid-template-columns: 80px 1fr; gap: 16px; align-items: center; padding: 16px; background: var(--panel); border: 1px solid var(--line); }
 .rung img { width: 80px; height: 80px; padding: 6px; background: var(--bg); border: 1px solid var(--line-soft); }
@@ -228,7 +229,7 @@ a.inline { color: var(--red); text-decoration: underline; }
 .rung.top { border-color: var(--red); background: linear-gradient(135deg, #1d1315, var(--panel) 65%); }
 .rung-note { color: var(--red) !important; font-weight: 700; }
 .rung-gap { grid-column: 2; color: var(--faint); font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; }
-.two p .button + .button { margin-left: 8px; }
+.two p:has(.button) { display: flex; flex-wrap: wrap; gap: 12px; }
 
 /* operations and recruit */
 .ops-empty { padding: 28px; border: 1px dashed var(--line); background: var(--bg-2); max-width: 760px; }
@@ -249,7 +250,7 @@ a.inline { color: var(--red); text-decoration: underline; }
 .crumbs { margin: 0 0 var(--s3); color: var(--muted); font-size: .88rem; }
 .crumbs a:hover { color: var(--ink); }
 .crumbs span { margin: 0 6px; color: var(--faint); }
-.jump { position: sticky; top: var(--bar); z-index: 20; background: rgba(9, 9, 11, .95); border-bottom: 1px solid var(--line); }
+.jump { position: sticky; top: var(--bar); z-index: 20; background: #09090b; border-bottom: 1px solid var(--line); }
 .jump .wrap { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; }
 .jump a { flex: none; display: flex; align-items: center; gap: 8px; min-height: 48px; padding: 0 14px; font-family: var(--display); font-weight: 700; letter-spacing: .1em; text-transform: uppercase; font-size: .9rem; color: var(--muted); border-bottom: 2px solid transparent; }
 .jump a b { color: var(--red); }
@@ -403,8 +404,22 @@ a.inline { color: var(--red); text-decoration: underline; }
   .srv h3 { font-size: 1.3rem; }
   .srv-find { display: none; }
   .actions .button { flex: 1 1 100%; }
+  .two p:has(.button) .button { flex: 1 1 100%; }
   .pop-num b { font-size: 2.4rem; }
 }
+@media (max-width: 639px) {
+  .jump .wrap { gap: 0; overflow: visible; padding-inline: 8px; }
+  .jump a { flex: 1 1 0; justify-content: center; padding: 0 2px; font-size: .78rem; letter-spacing: .04em; text-align: center; }
+  .jump a b { display: none; }
+}
+.tool:hover, .srv:hover { transform: translateY(-2px); }
+.tool, .srv { transition: border-color .2s, transform .2s, background-color .2s; }
+.button:hover { transform: translateY(-1px); }
+.button:active { transform: none; }
+:focus-visible { outline: 2px solid var(--red); outline-offset: 3px; }
+.reveal { opacity: 0; transform: translateY(14px); transition: opacity .5s ease-out, transform .5s ease-out, border-color .2s; transition-delay: var(--d, 0s); }
+.reveal.in { opacity: 1; transform: none; }
+.reveal.in:is(.tool, .srv):hover { transform: translateY(-2px); transition-delay: 0s; }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   * { transition: none !important; animation: none !important; }
