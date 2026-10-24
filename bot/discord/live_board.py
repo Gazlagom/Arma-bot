@@ -11,10 +11,10 @@ import time
 
 import discord
 
-from bot.config import live_board_channel_id
+from bot.config import game_leaderboard_channel_id, live_board_channel_id
 from bot.discord.leaderboard_command import table
 from bot.discord.leaderboard_display import retry_delay
-from bot.discord.match_results import CHUNK, duration, match_tag, titled
+from bot.discord.match_results import CHUNK, duration, match_tag, server_letter, titled
 from bot.storage.combat_store import match_number, window_standings
 
 LOG = logging.getLogger('reforger.liveboard')
@@ -104,6 +104,17 @@ class LiveBoard:
             if match is None or match['message'] is None:
                 return
             async with self.lock:
+                results = game_leaderboard_channel_id()
+                if results and results != live_board_channel_id():
+                    # The finished game is posted to the past games channel, so the live
+                    # channel doesn't keep a second copy.
+                    try:
+                        await match['message'].delete()
+                    except discord.HTTPException:
+                        pass
+                    LOG.info('Live board removed for %s; its results go to the past games channel',
+                             match['name'])
+                    return
                 guild = self.bot.get_guild(self.bot.config.guild_id)
                 if guild is None:
                     return
@@ -152,6 +163,22 @@ class LiveBoard:
                 return message
         return None
 
+    async def reorder(self, channel, guild, server_id):
+        """A new board lands at the bottom. Any running board of a later server (B
+        after A) is posted again beneath it, so the live boards stay in letter order."""
+        for other_id, other in list(self.matches.items()):
+            if other['message'] is None or server_letter(other_id) <= server_letter(server_id):
+                continue
+            rows = other['rows'] or self.rows(guild, other_id, other['started'])
+            try:
+                await other['message'].delete()
+            except discord.HTTPException:
+                pass
+            other['message'] = await channel.send(
+                embeds=board_embeds(other['name'], rows, other['started'], tag=other['tag']),
+                silent=True, allowed_mentions=discord.AllowedMentions.none())
+            other['rows'] = rows
+
     async def tick(self):
         async with self.lock:
             now = time.time()
@@ -177,6 +204,7 @@ class LiveBoard:
                             embeds=embeds, silent=True,
                             allowed_mentions=discord.AllowedMentions.none())
                         LOG.info('Live board opened for %s: %s', match['name'], match['message'].id)
+                        await self.reorder(channel, guild, server_id)
                     else:
                         await match['message'].edit(
                             embeds=embeds, allowed_mentions=discord.AllowedMentions.none())

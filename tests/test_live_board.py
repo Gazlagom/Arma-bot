@@ -77,7 +77,7 @@ def message_with(title, footer, author_id=7):
     embed = discord.Embed(title=title, description='x')
     embed.set_footer(text=footer)
     return SimpleNamespace(author=SimpleNamespace(id=author_id), embeds=[embed],
-                           id=1234, edit=AsyncMock())
+                           id=1234, edit=AsyncMock(), delete=AsyncMock())
 
 
 class OwnershipTests(unittest.TestCase):
@@ -143,6 +143,34 @@ class TickTests(unittest.IsolatedAsyncioTestCase):
         self.assertRegex(self.sent.edit.await_args.kwargs['embeds'][0].description,
                          r'Test Player\s+2\s+0')
 
+    async def test_a_board_that_opens_after_a_later_servers_goes_above_it(self):
+        two, one, two_again = (message_with(f'🔴 LIVE — {name}', MARKER) for name in ('Two', 'One', 'Two'))
+        self.channel.send = AsyncMock(side_effect=[two, one, two_again])
+        with self.enable():
+            self.board.start('server-2', 'Two', START)
+            self.kill('b', START + timedelta(minutes=5), OTHER, self.identity, server='server-2')
+            await self.board.tick()
+            self.board.start('server-1', 'One', START)
+            self.kill('a', START + timedelta(minutes=6), OTHER, self.identity, server='server-1')
+            await self.board.tick()
+        titles = [call.kwargs['embeds'][0].title for call in self.channel.send.await_args_list]
+        self.assertEqual([t.split('— ')[-1] for t in titles], ['Two', 'One', 'Two'])
+        two.delete.assert_awaited_once()
+        self.assertIs(self.board.matches['server-2']['message'], two_again)
+
+    async def test_boards_that_open_in_order_are_left_alone(self):
+        one, two = (message_with(f'🔴 LIVE — {name}', MARKER) for name in ('One', 'Two'))
+        self.channel.send = AsyncMock(side_effect=[one, two])
+        with self.enable():
+            self.board.start('server-1', 'One', START)
+            self.kill('a', START + timedelta(minutes=5), OTHER, self.identity, server='server-1')
+            await self.board.tick()
+            self.board.start('server-2', 'Two', START)
+            self.kill('b', START + timedelta(minutes=6), OTHER, self.identity, server='server-2')
+            await self.board.tick()
+        self.assertEqual(self.channel.send.await_count, 2)
+        one.delete.assert_not_awaited()
+
     async def test_an_unchanged_board_is_not_edited(self):
         with self.enable():
             self.board.start('s', 'OYB Classic', START)
@@ -169,8 +197,9 @@ class TickTests(unittest.IsolatedAsyncioTestCase):
         self.assertRegex(self.channel.send.await_args.kwargs['embeds'][0].description,
                          r'Test Player\s+1\s+0')
 
-    async def test_the_live_message_becomes_the_final_board(self):
-        with self.enable(), patch('bot.discord.live_board.SETTLE', 0):
+    async def test_when_results_share_the_live_channel_the_live_message_becomes_the_final_board(self):
+        with self.enable(), patch.dict(os.environ, {'GAME_LEADERBOARD_CHANNEL_ID': '555'}), \
+                patch('bot.discord.live_board.SETTLE', 0):
             self.board.start('s', 'OYB Classic', START)
             self.kill('one', START + timedelta(minutes=5), OTHER, self.identity)
             await self.board.tick()
@@ -179,6 +208,18 @@ class TickTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.channel.send.await_count, 1)  # still one message
         embed = self.sent.edit.await_args.kwargs['embeds'][0]
         self.assertIn('Match results', embed.title)
+        self.assertNotIn('s', self.board.matches)
+
+    async def test_with_a_past_games_channel_the_finished_board_is_removed(self):
+        with self.enable(), patch.dict(os.environ, {'GAME_LEADERBOARD_CHANNEL_ID': '777'}), \
+                patch('bot.discord.live_board.SETTLE', 0):
+            self.board.start('s', 'OYB Classic', START)
+            self.kill('one', START + timedelta(minutes=5), OTHER, self.identity)
+            await self.board.tick()
+            self.board.finish('s')
+            await _drain(self.board)
+        self.sent.delete.assert_awaited_once()
+        self.sent.edit.assert_not_awaited()
         self.assertNotIn('s', self.board.matches)
 
     async def test_a_restart_takes_the_old_board_back_over(self):
