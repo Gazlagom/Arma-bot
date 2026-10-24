@@ -1583,14 +1583,19 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         html = await home.text()
         self.assertEqual(home.status, 200)
         self.assertIn("Old Young Bastards.", html)
-        self.assertIn("3 playing · 1 of 2 up", html)
-        self.assertIn("One community. Countless battles.", html)
-        self.assertIn('href="#leaderboards"', html)
+        self.assertIn("3 playing across 1 online server", html)
+        self.assertIn("Old Young <em>Bastards</em>", html)
+        self.assertIn("Old and young, just playing and having a good time", html)
+        self.assertNotIn("Countless battles", html)
+        self.assertIn('class="button primary small bar-discord"', html)
+        self.assertNotIn('aria-label="OYB Gaming home"><img', html)
+        self.assertIn('href="/players"', html)
+        self.assertIn('href="/servers"', html)
         self.assertIn("data-stale hidden", html)
         self.assertNotIn("No servers are listed", html)
-        self.assertIn("Type <b>OYB</b> in the server browser search", html)
-        self.assertIn('class="button primary" href="https://discord.gg/oyb"', html)
-        self.assertNotIn("View servers", html)
+        self.assertIn("then search <b>OYB</b>", html)
+        self.assertIn('href="https://discord.gg/oyb"', html)
+        self.assertNotIn("have not been supplied", html)
         font = await self.client.get("/brand/fonts/Display.ttf", headers={"Host": "oybgaming.com"})
         self.assertEqual(font.status, 200)
         self.assertNotIn("Log in", html)
@@ -1619,13 +1624,16 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         html = await (await self.client.get("/", headers={"Host": "oybgaming.com"})).text()
         self.assertIn("OYB Gaming", html)
         self.assertIn('href="https://discord.gg/oyb123"', html)
-        self.assertIn("Join via IP", html)
         self.assertIn("OYB Main", html)
         self.assertNotIn("Server 2", html)
+        servers = await (await self.client.get("/servers", headers={"Host": "oybgaming.com"})).text()
+        self.assertIn("Join via IP", servers)
         await self.client.post("/website", data={"csrf": token, "name": "OYB Gaming", "about": "Hi"})
         empty = await (await self.client.get("/", headers={"Host": "oybgaming.com"})).text()
         self.assertIn("No servers are listed right now", empty)
         self.assertNotIn('href="#servers"', empty)
+        self.assertIn("No servers are listed right now", await (await self.client.get(
+            "/servers", headers={"Host": "oybgaming.com"})).text())
         preview = await (await self.client.get("/website/preview")).text()
         self.assertIn("Preview of the public site", preview)
 
@@ -2589,18 +2597,107 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         page = await (await self.client.get("/server/server-1")).text()
         self.assertIn('data-tab-panel="health"', page)
 
+    async def test_the_public_site_has_a_server_network_and_a_page_per_server(self):
+        self.config.site_hosts = ["oybgaming.com"]
+        host = {"Host": "oybgaming.com"}
+        with tempfile.TemporaryDirectory() as data:
+            self.config.oyb_data = data
+            Path(data, "panel_bridge.json").write_text(json.dumps({"updated": now(), "servers": [{
+                "id": "server-1", "label": "OYB Classic",
+                "settings": "**Game:** Arma Reforger\n**Setup:** Vanilla / unmodded\n**Map:** Everon\n"
+                            "Map, player slots and other settings have not been supplied yet."}]}))
+            network = await self.client.get("/servers", headers=host)
+            html = await network.text()
+            self.assertEqual(network.status, 200)
+            self.assertIn("OYB Classic", html)
+            self.assertIn("Vanilla / unmodded", html)
+            self.assertIn("Everon", html)
+            self.assertNotIn("have not been supplied", html)
+            for section in ('id="network"', 'id="join"', 'id="rules"', 'id="faq"'):
+                self.assertIn(section, html)
+            home = await (await self.client.get("/", headers=host)).text()
+            self.assertNotIn("have not been supplied", home)
+            self.assertIn('href="/servers/oyb-classic"', home)
+            page = await self.client.get("/servers/oyb-classic", headers=host)
+            detail = await page.text()
+            self.assertEqual(page.status, 200)
+            self.assertIn("<h1>OYB Classic</h1>", detail)
+            self.assertIn("Online", detail)
+            self.assertIn("<dt>Map</dt><dd>Everon</dd>", detail)
+            self.assertIn("Find it in the game", detail)
+            for hidden in ("RCON", "19991", "rcon", "panel"):
+                self.assertNotIn(hidden, detail)
+            self.assertEqual((await self.client.get("/servers/nowhere", headers=host)).status, 404)
+        off_site = await self.client.get("/servers/oyb-classic", allow_redirects=False)
+        self.assertEqual((off_site.status, off_site.headers["Location"]), (302, "/login"))
+
+    async def test_the_status_feed_carries_slots_but_never_names(self):
+        self.config.site_hosts = ["oybgaming.com"]
+        state = self.manager.state("server-1")
+        state.query = {"ok": True, "slots": 64, "map": "Everon", "version": "1.2"}
+        live = await (await self.client.get("/status.json", headers={"Host": "oybgaming.com"})).json()
+        self.assertEqual([s["slots"] for s in live["servers"] if s["id"] == "server-1"], [64])
+        self.assertNotIn("Everon", json.dumps(live))
+        html = await (await self.client.get("/servers", headers={"Host": "oybgaming.com"})).text()
+        self.assertIn("<span data-slots>64</span>", html)
+        self.assertIn('<p class="srv-facts">Everon</p>', html)
+
+    async def test_the_public_leaderboard_has_weekly_and_all_time_boards_with_search(self):
+        self.config.site_hosts = ["oybgaming.com"]
+        host = {"Host": "oybgaming.com"}
+        with tempfile.TemporaryDirectory() as root:
+            bot_data(root)
+            self.client.app[STATS_KEY].data = Path(root)
+            self.client.app[STATS_KEY]._boards.clear()
+            weekly = await (await self.client.get("/players", headers=host)).text()
+            self.assertIn("No kills recorded this week yet", weekly)
+            life = await (await self.client.get("/players?board=lifetime", headers=host)).text()
+            self.assertIn('<td class="who">Sgt Havoc</td><td>3</td><td>1</td><td>3.00</td>', life)
+            self.assertIn("1 player ·", life)
+            hit = await (await self.client.get("/players?board=lifetime&q=HAVOC", headers=host)).text()
+            self.assertIn("Sgt Havoc", hit)
+            miss = await (await self.client.get("/players?board=lifetime&q=zzz", headers=host)).text()
+            self.assertIn('Nobody called "zzz"', miss)
+            self.assertNotIn("Sgt Havoc", miss)
+            late = await self.client.get("/players?board=lifetime&page=99&q=", headers=host)
+            self.assertEqual(late.status, 200)
+        self.client.app[STATS_KEY]._boards.clear()
+        self.client.app[STATS_KEY].data = Path("/nonexistent")
+        gone = await self.client.get("/players", headers=host)
+        self.assertEqual(gone.status, 200)
+        self.assertIn("isn't available right now", await gone.text())
+
+    async def test_the_ranks_page_follows_the_bots_own_rules(self):
+        from bot.ranks.rank_rules import RANKS
+        self.config.site_hosts = ["oybgaming.com"]
+        host = {"Host": "oybgaming.com"}
+        html = await (await self.client.get("/ranks", headers=host)).text()
+        for rank in RANKS:
+            self.assertIn(f"<h3>{rank.name}</h3>", html)
+            self.assertIn(f"/ranks/insignia/{rank.slug}.svg", html)
+        for needed in ("250 XP", "8500 XP", "every 10 minutes", "+5 XP", "+2 XP", "−15 XP", "up to 10 a day"):
+            self.assertIn(needed, html)
+        art = await self.client.get("/ranks/insignia/major.svg", headers=host)
+        self.assertEqual((art.status, art.content_type), (200, "image/svg+xml"))
+        for path in ("/ranks/insignia/nope.svg", "/ranks/insignia/major", "/ranks/insignia/..%2fmajor.svg"):
+            self.assertEqual((await self.client.get(path, headers=host)).status, 404, path)
+        home = await (await self.client.get("/", headers=host)).text()
+        self.assertIn('href="/players"', home)
+        self.assertIn('href="/ranks"', home)
+        self.assertEqual((await self.client.get("/ranks", allow_redirects=False)).status, 302)
+
     async def test_site_shows_the_discord_rules(self):
         self.config.site_hosts = ["oybgaming.com"]
         with tempfile.TemporaryDirectory() as data:
             self.config.oyb_data = data
             Path(data, "panel_bridge.json").write_text(json.dumps({"updated": now(), "card": {
                 "rules": "• **No teamkilling**\n• No cheating\n\n3. Respect admins"}}))
-            html = await (await self.client.get("/", headers={"Host": "oybgaming.com"})).text()
+            html = await (await self.client.get("/servers", headers={"Host": "oybgaming.com"})).text()
             self.assertIn('href="#rules"', html)
             self.assertIn("<li>No teamkilling</li>", html)
             self.assertIn("<li>Respect admins</li>", html)
             self.db.publish_discord_doc("serverinfo", json.dumps({"rules": "Have fun"}), "gaz")
-            html = await (await self.client.get("/", headers={"Host": "oybgaming.com"})).text()
+            html = await (await self.client.get("/servers", headers={"Host": "oybgaming.com"})).text()
             self.assertIn("<li>Have fun</li>", html)
             self.assertNotIn("No cheating", html)
 
@@ -2747,9 +2844,34 @@ class SiteOrderTests(unittest.TestCase):
                   "plus": SimpleNamespace(online=True, players=[1] * 5),
                   "down": SimpleNamespace(online=False, players=[])}
         doc = site.check_site({}, [c.id for c in configs])[0]
-        shown = site.view(doc, configs, states, {})["games"]["Arma Reforger"]
+        shown = site.view(doc, configs, states, {})["servers"]
         self.assertEqual([s["id"] for s in shown], ["classic", "everon", "plus", "down"])
         self.assertEqual(shown[0]["join"], "")
+
+    def test_slots_health_and_slugs_come_from_what_is_known(self):
+        from types import SimpleNamespace
+        from panel import site
+        configs = [SimpleNamespace(id=i, name=n) for i, n in (("a", "3x Everon"), ("b", "3x Everon"), ("c", "Classic"))]
+        states = {"a": SimpleNamespace(online=True, players=[1] * 3), "b": SimpleNamespace(online=False, players=[]),
+                  "c": SimpleNamespace(online=True, players=[])}
+        doc = site.check_site({}, ["a", "b", "c"])[0]
+        view = site.view(doc, configs, states, {}, {"a": {"slots": 64, "map": "Everon", "version": "1.2"}})
+        self.assertEqual([s["slug"] for s in view["servers"]], ["3x-everon", "classic", "3x-everon-b"])
+        self.assertEqual((view["slots"], view["slots_all_known"], view["health"]), (64, False, "partial"))
+        first = view["servers"][0]
+        self.assertEqual((first["map"], first["slots"], first["version"]), ("Everon", 64, "1.2"))
+        offline = view["servers"][2]
+        self.assertEqual((offline["map"], offline["version"]), ("", ""))
+        self.assertEqual(site.view(doc, [], {}, {})["health"], "unknown")
+        down = site.view(doc, configs[:1], {"a": SimpleNamespace(online=False, players=[])}, {})
+        self.assertEqual((down["health"], down["slots"]), ("down", None))
+
+    def test_only_key_value_lines_of_the_settings_card_reach_visitors(self):
+        from panel import site
+        card = ("**Game:** Arma Reforger\n**Setup:** Vanilla / unmodded\n**Map:** Everon\n"
+                "Map, player slots and other settings have not been supplied yet.")
+        self.assertEqual(site.facts(card), {"game": "Arma Reforger", "setup": "Vanilla / unmodded", "map": "Everon"})
+        self.assertEqual(site.facts("Nothing here\nJust a sentence."), {})
 
 
 if __name__ == "__main__":

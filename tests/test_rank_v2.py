@@ -16,36 +16,41 @@ from test_playtime import join, heartbeat, leave, UID
 
 class RuleTests(unittest.TestCase):
     def test_all_boundaries(self):
-        # Once on a side, Recruit is the floor: nobody on a faction is Renegade.
-        expected = {0: 'Recruit', 1: 'Recruit', 99: 'Recruit', 100: 'Recruit', 249: 'Recruit',
-                    250: 'Private', 449: 'Private', 450: 'Corporal', 699: 'Corporal',
-                    700: 'Sergeant', 999: 'Sergeant', 1000: 'Lieutenant', 1399: 'Lieutenant',
-                    1400: 'Captain', 1899: 'Captain', 1900: 'Major', 5000: 'Major'}
+        # Below Private is Renegade, side or not.
+        expected = {0: 'Renegade', 1: 'Renegade', 249: 'Renegade', 250: 'Private', 749: 'Private',
+                    750: 'Corporal', 1749: 'Corporal', 1750: 'Sergeant', 3249: 'Sergeant',
+                    3250: 'Lieutenant', 5499: 'Lieutenant', 5500: 'Captain', 8499: 'Captain',
+                    8500: 'Major', 20000: 'Major'}
         for xp, name in expected.items():
             with self.subTest(xp=xp):
                 self.assertEqual(rank_for_xp(xp, 'US').current.name, name)
 
+    def test_negative_xp_is_renegade_even_on_a_side(self):
+        self.assertEqual(rank_for_xp(-1, 'US').current.name, 'Renegade')
+        self.assertEqual(rank_for_xp(0, 'US').current.name, 'Renegade')
+
     def test_renegade_is_the_rank_for_nobody_on_a_side(self):
         # Renegade is where a new member waits, not the bottom of the ladder,
         # so XP alone never lifts anyone off it.
-        for xp in (0, 99, 100, 5000):
+        for xp in (0, 99, 250, 20000):
             with self.subTest(xp=xp):
                 self.assertEqual(rank_for_xp(xp).current.name, 'Renegade')
                 self.assertEqual(rank_for_xp(xp, None).tier, 0)
-        # Picking any of the three starts them at Recruit on the same XP.
+        # Picking a side does not change the rank until the XP is there.
         for faction in ('US', 'USSR', 'FIA'):
-            self.assertEqual(rank_for_xp(0, faction).current.name, 'Recruit')
-        # A Renegade carrying more than Recruit asks for does not overfill.
-        self.assertEqual(rank_for_xp(5000).fraction, 1.0)
-        self.assertEqual(rank_for_xp(5000).remaining, 0)
+            self.assertEqual(rank_for_xp(0, faction).current.name, 'Renegade')
+            self.assertEqual(rank_for_xp(250, faction).current.name, 'Private')
+        # A Renegade carrying more than Private asks for does not overfill.
+        self.assertEqual(rank_for_xp(20000).fraction, 1.0)
+        self.assertEqual(rank_for_xp(20000).remaining, 0)
 
     def test_xp_fraction_and_maximum(self):
         for seconds, xp in ((599, 0), (600, 1), (1199, 1), (1200, 2), (1560, 2)):
             self.assertEqual(xp_from_seconds(seconds), xp)
-        p = rank_for_xp(350, 'US')
-        self.assertEqual((p.current.threshold, p.next.threshold, p.remaining, p.fraction), (250, 450, 100, .5))
-        self.assertEqual(rank_for_xp(450, 'US').fraction, 0)
-        p = rank_for_xp(1900, 'US')
+        p = rank_for_xp(500, 'US')
+        self.assertEqual((p.current.threshold, p.next.threshold, p.remaining, p.fraction), (250, 750, 250, .5))
+        self.assertEqual(rank_for_xp(750, 'US').fraction, 0)
+        p = rank_for_xp(8500, 'US')
         self.assertEqual((p.next, p.remaining, p.fraction), (None, None, 1))
 
 
@@ -135,7 +140,7 @@ class PersistenceTests(unittest.TestCase):
 
 class CardTests(unittest.TestCase):
     def test_cards_fit_and_major_has_no_next_rank(self):
-        for name,xp in [('GazLagom',0),('GARETH',143),('GARETH',347),('GARETH',450),('GARETH',1900),('Long name '*40,2600),('Gáréth · Ελληνικά · Игрок · 玩家',600)]:
+        for name,xp in [('GazLagom',0),('GARETH',143),('GARETH',347),('GARETH',450),('GARETH',8500),('Long name '*40,2600),('Gáréth · Ελληνικά · Игрок · 玩家',600)]:
             audit=[]
             with Image.open(BytesIO(render_card(name,xp,audit=audit,faction='US'))) as card:
                 self.assertEqual(card.size,(960,320))
@@ -145,8 +150,8 @@ class CardTests(unittest.TestCase):
                 self.assertLessEqual(box[2],limit[2]+2,text)
                 self.assertLessEqual(box[3],320,text)
             labels=[t for t,_,_ in audit]
-            self.assertEqual('MAX RANK' in labels,xp>=1900)
-            self.assertEqual('NEXT RANK' in labels,xp<1900)
+            self.assertEqual('MAX RANK' in labels,xp>=8500)
+            self.assertEqual('NEXT RANK' in labels,xp<8500)
 
     def test_a_card_without_a_faction_asks_for_one(self):
         # XP alone never lifts a Renegade, so the card must not imply it will.
@@ -155,12 +160,12 @@ class CardTests(unittest.TestCase):
         labels=[t for t,_,_ in audit]
         self.assertIn('RENEGADE',labels)
         self.assertIn('PICK A FACTION',labels)
-        self.assertIn('RECRUIT',labels)           # what picking one gets them
+        self.assertIn('PRIVATE',labels)           # what picking one gets them
         self.assertIn('2,600 XP',labels)          # not '2,600 / 100 XP'
         self.assertNotIn('0 XP REMAINING',labels)
         # On a side the same XP counts down to the next rank as normal.
         audit=[]
-        render_card('GazLagom',2600,audit=audit,faction='US')
+        render_card('GazLagom',8500,audit=audit,faction='US')
         labels=[t for t,_,_ in audit]
         self.assertIn('MAJOR',labels)
         self.assertIn('MAX RANK',labels)

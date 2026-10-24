@@ -25,6 +25,7 @@ from bot.web import server as mortar_server
 from bot.mortar.solution import OUT_OF_RANGE, apply_wind, bearing, parse_grid, profiles
 from bot.mortar.wind import Wind
 
+from bot.ranks.rank_rules import RANKS, SECONDS_PER_XP, XP_PER_TEAMKILL
 from . import archive, attacks, auth, ballistics, console, files, investigate, maptiles, memory, monitor, netcheck, outliers, site, whois, workshop
 from .amp import GAME_NODE, MAX_ADMINS, Amp, AmpError, instance_name as amp_instance_name, parse_ids
 from .alerts import GOLD, GREEN, RED
@@ -266,7 +267,7 @@ async def security(request, handler):
 
 
 SITE_FILES = ("/static/site.css", "/static/site.js", "/static/site/oyb-logo.jpg", "/static/site/oyb-icon.png",
-              "/static/site/banner.jpg", "/brand/fonts/Display.ttf", "/brand/fonts/Body.ttf")
+              "/static/site/hero.jpg", "/brand/fonts/Display.ttf", "/brand/fonts/Body.ttf")
 
 
 @web.middleware
@@ -282,6 +283,12 @@ async def public_site(request, handler):
             return web.Response(text="User-agent: *\nAllow: /\n")
         if request.method == "GET" and request.path in SITE_FILES:
             return await handler(request)
+        if request.method == "GET" and (request.path == "/servers" or request.path.startswith("/servers/")):
+            return site_servers(request)
+        if request.method == "GET" and request.path.rstrip("/") == "/players":
+            return site_players(request)
+        if request.method == "GET" and (request.path.rstrip("/") == "/ranks" or request.path.startswith("/ranks/insignia/")):
+            return site_ranks(request)
         if request.path == "/mortar" or request.path.startswith("/mortar/"):
             return await site_mortar(request)
         if request.method == "GET" and (request.path == "/workshop" or request.path.startswith("/workshop/")):
@@ -754,9 +761,33 @@ def site_doc(request):
     return site.check_site(raw, [s.id for s in request.app[CONFIG].servers])[0]
 
 
+def site_live(request):
+    """What each server last said about itself: its slots, map and game version."""
+    live = {}
+    for state in request.app[MANAGER].states.values():
+        found = state.query if (state.query or {}).get("ok") else {}
+        slots = found.get("slots")
+        try:
+            game_map = found.get("map") or (files.server_map(state.config) if state.online else "")
+        except OSError:
+            game_map = ""
+        live[state.config.id] = {"slots": slots if isinstance(slots, int) and slots > 0 else None,
+                                 "map": game_map, "version": found.get("version") or ""}
+    return live
+
+
 def site_view(request, doc=None):
     return site.view(doc or site_doc(request), request.app[CONFIG].servers, request.app[MANAGER].states,
-                     bridge(request))
+                     bridge(request), site_live(request))
+
+
+def render_site(request, template, doc, **context):
+    """Every page of the public site shares one layout; this is how each one is drawn."""
+    context.setdefault("preview", False)
+    context.setdefault("has_hero", (HERE / "static" / "site" / "hero.jpg").exists())
+    html = request.app[JINJA].get_template(template).render(
+        doc=doc, asset_version=ASSET_VERSION, year=time.strftime("%Y"), **context)
+    return web.Response(text=html, content_type="text/html")
 
 
 def site_rules(request):
@@ -768,11 +799,81 @@ def site_rules(request):
 
 def site_page(request, preview=False):
     doc = site_doc(request)
-    html = request.app[JINJA].get_template("site.html").render(
-        doc=doc, site=site_view(request, doc), rules=site_rules(request), board=request.app[STATS].weekly_board(),
-        preview=preview,
-        asset_version=ASSET_VERSION, year=time.strftime("%Y"))
-    return web.Response(text=html, content_type="text/html")
+    return render_site(request, "site.html", doc, site=site_view(request, doc), board=request.app[STATS].weekly_board(),
+                       preview=preview, active="home")
+
+
+PLAYERS_PER_PAGE = 25
+RANK_ART = HERE / "static" / "site" / "ranks"
+
+
+def site_players(request):
+    """The leaderboard: this week or all time, with a search box and pages."""
+    doc = site_doc(request)
+    kind = "lifetime" if request.query.get("board") == "lifetime" else "weekly"
+    search = " ".join(request.query.get("q", "").split())[:40]
+    try:
+        page = max(1, int(request.query.get("page", "1")))
+    except ValueError:
+        page = 1
+    board = request.app[STATS].standings(kind)
+    rows = []
+    for place, row in enumerate(board["rows"] if board else [], start=1):
+        if search and search.lower() not in row["name"].lower():
+            continue
+        ratio = row["kills"] / row["deaths"] if row["deaths"] else row["kills"]
+        rows.append({**row, "place": place, "kd": f"{ratio:.2f}"})
+    pages = max(1, -(-len(rows) // PLAYERS_PER_PAGE))
+    page = min(page, pages)
+
+    def link(**changes):
+        query = {"board": kind, "q": search, "page": page, **changes}
+        query = {k: v for k, v in query.items() if v not in ("", None) and not (k == "board" and v == "weekly")
+                 and not (k == "page" and v == 1)}
+        return "/players" + ("?" + urlencode(query) if query else "")
+
+    links = {"weekly": link(board="weekly", page=1), "lifetime": link(board="lifetime", page=1),
+             "prev": link(page=page - 1) if page > 1 else "", "next": link(page=page + 1) if page < pages else ""}
+    shown = rows[(page - 1) * PLAYERS_PER_PAGE:page * PLAYERS_PER_PAGE]
+    return render_site(request, "site_players.html", doc, board=board, kind=kind, search=search, rows=shown,
+                       found=len(rows), page=page, pages=pages, links=links, active="players")
+
+
+def site_ranks(request):
+    """How OYB ranks work, from the same rules the bot uses, and the insignia pictures."""
+    parts = request.path.split("/")
+    if request.path.startswith("/ranks/insignia/"):
+        slug = parts[3][:-4] if len(parts) == 4 and parts[3].endswith(".svg") else ""
+        if slug in {rank.slug for rank in RANKS} and (RANK_ART / f"{slug}.svg").is_file():
+            return web.FileResponse(RANK_ART / f"{slug}.svg", headers={
+                "Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400"})
+        raise web.HTTPNotFound(text="No such insignia.")
+    if request.path.rstrip("/") != "/ranks":
+        raise web.HTTPNotFound(text="Not found.")
+    ladder = []
+    for index, rank in enumerate(RANKS):
+        following = RANKS[index + 1] if index + 1 < len(RANKS) else None
+        ladder.append({"name": rank.name, "slug": rank.slug, "threshold": rank.threshold,
+                       "hours": round(rank.threshold * SECONDS_PER_XP / 3600),
+                       "gap": following.threshold - rank.threshold if following and index else None,
+                       "top": following is None, "start": index == 0})
+    return render_site(request, "site_ranks.html", site_doc(request), ladder=ladder,
+                       minutes_per_xp=SECONDS_PER_XP // 60, teamkill=-XP_PER_TEAMKILL, active="players")
+
+
+def site_servers(request):
+    """The server network, and one page for each server in it."""
+    doc, view = site_doc(request), None
+    view = site_view(request, doc)
+    parts = request.path.rstrip("/").split("/")
+    if len(parts) == 2:
+        return render_site(request, "site_servers.html", doc, site=view, rules=site_rules(request), active="servers")
+    if len(parts) == 3:
+        server = next((s for s in view["servers"] if s["slug"] == parts[2]), None)
+        if server:
+            return render_site(request, "site_server.html", doc, site=view, server=server, rules=site_rules(request),
+                               active="servers")
+    raise web.HTTPNotFound(text="No such server.")
 
 
 async def site_workshop(request):
@@ -808,9 +909,7 @@ def render_workshop(request, doc, **context):
     context.setdefault("sort", "popularity")
     context.setdefault("sorts", workshop.SORTS)
     context.setdefault("links", {})
-    html = request.app[JINJA].get_template("workshop_site.html").render(
-        doc=doc, asset_version=ASSET_VERSION, year=time.strftime("%Y"), **context)
-    return web.Response(text=html, content_type="text/html")
+    return render_site(request, "workshop_site.html", doc, active="", **context)
 
 
 async def website_page(request):
