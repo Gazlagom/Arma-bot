@@ -23,6 +23,7 @@ modded class SCR_InventoryStorageBaseUI
 	protected Widget m_wOYB_CategoryColumn;
 	protected Widget m_wOYB_LoadoutRow;
 	protected TextWidget m_wOYB_WeaponText;
+	protected SCR_InputButtonComponent m_OYB_WeaponKey;
 	protected TextWidget m_wOYB_LoadoutText;
 	protected SCR_EditBoxComponent m_OYB_Search;
 	protected ref array<SCR_ButtonTextComponent> m_aOYB_CategoryButtons = {};
@@ -140,7 +141,8 @@ modded class SCR_InventoryStorageBaseUI
 		if (weapon)
 		{
 			weaponEntity = weapon.GetOwner();
-			weapon.GetAttachments(slots);
+			array<IEntity> owners = {};
+			OYB_TargetWeapon.GetSlots(weaponEntity, slots, owners);
 			weapon.GetMuzzlesList(muzzles);
 			foreach (AttachmentSlotComponent slot : slots)
 			{
@@ -159,7 +161,12 @@ modded class SCR_InventoryStorageBaseUI
 			m_mOYB_Fits.Clear();
 			m_sOYB_WeaponName = string.Empty;
 			if (weaponEntity && weaponEntity.GetPrefabData())
-				m_sOYB_WeaponName = OYB_ArsenalCatalogService.OYB_ReadInventoryName(weaponEntity.GetPrefabData().GetPrefabName());
+			{
+				ResourceName weaponPrefab = weaponEntity.GetPrefabData().GetPrefabName();
+				m_sOYB_WeaponName = OYB_ArsenalSettings.Get().GetDisplayName(weaponPrefab);
+				if (m_sOYB_WeaponName.IsEmpty())
+					m_sOYB_WeaponName = FilePath.StripExtension(FilePath.StripPath(weaponPrefab.GetPath()));
+			}
 		}
 
 		int count;
@@ -331,10 +338,12 @@ modded class SCR_InventoryStorageBaseUI
 			cycle.m_OnActivated.Insert(OYB_OnNextCategory);
 
 		// The Weapon key and < M16A2 > pick which carried weapon the Fits list
-		// and attachment fitting work on.
-		SCR_InputButtonComponent weaponKey = OYB_CreateNavButton(categoryRow, "MenuRefresh", "Weapon");
-		if (weaponKey)
-			weaponKey.m_OnActivated.Insert(OYB_OnWeaponKey);
+		// and attachment fitting work on. On a controller MenuRefresh is the same
+		// button as Requisition, so there the key is hidden and the weapon in
+		// hand is used.
+		m_OYB_WeaponKey = OYB_CreateNavButton(categoryRow, "MenuRefresh", "Weapon");
+		if (m_OYB_WeaponKey)
+			m_OYB_WeaponKey.m_OnActivated.Insert(OYB_OnWeaponKey);
 
 		SCR_ButtonTextComponent previousWeapon, nextWeapon;
 		m_wOYB_WeaponText = OYB_BuildSwitcher(categoryRow, previousWeapon, nextWeapon);
@@ -745,6 +754,9 @@ modded class SCR_InventoryStorageBaseUI
 		}
 		counts[OYB_EArsenalCategory.FITS_WEAPON] = m_iOYB_FitCount;
 
+		if (m_OYB_WeaponKey)
+			m_OYB_WeaponKey.GetRootWidget().SetVisible(GetGame().GetInputManager().IsUsingMouseAndKeyboard());
+
 		if (m_wOYB_WeaponText)
 		{
 			string weaponLabel = "No weapon";
@@ -793,6 +805,9 @@ modded class SCR_InventoryStorageBaseUI
 
 	protected void OYB_OnWeaponKey(SCR_InputButtonComponent button, string action)
 	{
+		if (!GetGame().GetInputManager().IsUsingMouseAndKeyboard())
+			return;
+
 		OYB_OnNextWeapon(null);
 	}
 

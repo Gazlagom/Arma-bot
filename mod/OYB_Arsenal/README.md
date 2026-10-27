@@ -28,7 +28,9 @@ below. Ownership: `NOTICE.md`.
 - **Weapon picker**: the **Weapon** key and "< M16A2 >" in the bar step through the
   guns you carry (in hands, then each weapon slot; grenades skipped). The
   "Fits" list and attachment fitting work on the chosen weapon, slung or
-  holstered, without switching to it (`OYB_ArsenalTargetWeapon.c`).
+  holstered, without switching to it (`OYB_ArsenalTargetWeapon.c`). On a
+  controller the Weapon button is the same as Requisition, so the key is
+  hidden there and the weapon in hand is used.
 - **Fit attachments in one go** (`OYB_ArsenalWeaponFitting.c`): double-click
   an attachment in the arsenal, or drag it onto the character, and it goes
   straight onto the matching slot of the weapon in your hands. Whatever was in
@@ -38,6 +40,8 @@ below. Ownership: `NOTICE.md`.
   this avoids paying for nothing). If the old part can't be refunded, nothing
   changes. The new part is requested with the game's
   own arsenal request, so the server's checks and supply cost still apply.
+  Slots on fitted parts count too (a rail adapter's own scope slot), for both
+  fitting and the Fits list.
   Magazines and other items keep the vanilla behaviour.
 - **Put clothing on in one go** (`OYB_ArsenalClothing.c`, hooked in `OYB_ArsenalWeaponFitting.c`): double-click a
   uniform, vest, helmet, backpack or other worn item in the arsenal and it is
@@ -47,6 +51,11 @@ below. Ownership: `NOTICE.md`.
   arsenal with the game's own refund. If the new piece doesn't arrive, the old
   one goes back on; if something doesn't fit or the arsenal won't take it
   back, the old piece is left on the ground with its contents.
+- **Accessories onto worn gear** (also `OYB_ArsenalWeaponFitting.c`):
+  double-click a helmet light, NVGs or a vest flashlight and it goes into a
+  free spot for it on what you wear (a helmet's mount, or a mount already on
+  the helmet), not into the bag. Pockets and backpacks don't count. If the
+  spot is taken, the old accessory is swapped out and refunded, like clothing.
 - **Swap weapons in one go** (also `OYB_ArsenalClothing.c`): double-click a
   weapon and it goes into a free weapon slot that takes it; with none free,
   the weapon in its slot comes off and goes back into the arsenal whole
@@ -73,6 +82,11 @@ below. Ownership: `NOTICE.md`.
   its mod tagged it with, so a US gun can be in the USSR arsenal too, or only
   there, one item at a time or everything a filter shows. A side whose catalogue doesn't list the item gets it at its usual
   price; a side it was taken from can't have it, even in a saved kit.
+- **Renaming from the panel** (`OYB_ArsenalItemNames.c`): give an item a
+  shorter name and every player sees it within a minute, in the arsenal, its
+  search, the hover box and the inventory. The game keeps a second copy of a
+  weapon's name for the on-screen weapon display (and possibly the kill
+  feed), which keeps the original. Items that shared a name share the new one.
 - **Mod scan**: on start the server also searches every loaded (non-base)
   mod's `Prefabs` folder for items no faction catalogue lists (a mod that
   wasn't set up properly), a few at a time so it doesn't hold the server up,
@@ -138,7 +152,7 @@ server or with a controller yet.
 - Left open: the two `OverlayWidget Frame0 has invalid slot GridWidgetSlot`
   errors may be the game's own (check with the mod off).
 
-**2. Keyboard and controller — Keyboard verified; controller awaiting testing**
+**2. Keyboard and controller — Keyboard verified; controller partly tested**
 - OYB uses the game's own menu actions, so players change the keys in the
   game's own key settings. Verified in Workbench, one action each, no
   clashes: Category X (`MenuFilter`), Weapon R (`MenuRefresh`), Save F
@@ -148,7 +162,11 @@ server or with a controller yet.
   as Weapon), `MenuDeploy` (Space, only works on the respawn screen).
 - Not done: OYB-only named actions under their own heading in the key
   settings (needs the game's input and key-settings configs from Workbench
-  as a template); inspecting an arsenal item; controller testing.
+  as a template); inspecting an arsenal item; a controller button for
+  Weapon (X is Requisition there, so it's hidden on a controller).
+- Controller (live server): the prompts show Category on the menu button,
+  Save on Y and Load on the right stick (not yet confirmed working); Weapon
+  on X clashed with Requisition and is now keyboard only.
 
 **3. Loadouts — Verified in Workbench; dedicated server awaiting testing**
 - Five slots per player, saved on the server under `$profile:` by player
@@ -252,7 +270,8 @@ Nothing needs setting up. What there is:
   [cost, ...], "extraFactions": ["" or "US,FIA", ...], "extraCategories":
   [category name, ...], "categoryItems": [prefab, ...], "categoryNames":
   [category name, ...], "sideItems": [prefab, ...], "sideFactions":
-  ["US,USSR", ...]}`, prefabs written as `{GUID}Prefabs/....et` the
+  ["US,USSR", ...], "renameItems": [prefab, ...], "renameNames": [new name,
+  ...]}`, prefabs written as `{GUID}Prefabs/....et` the
   way `items.json` lists them.
 
 - **The game's own arsenal settings** on each arsenal (faction, item types,
@@ -341,6 +360,9 @@ Status: ✅ verified in Workbench, ⏳ awaiting testing.
 | Branding | Walk up to any arsenal, open it | Prompt and the title bar inside say "OYB Arsenal" | ✅ |
 | Full arsenal | Open a clothing-only box | Weapons, ammo, equipment and clothing all listed | ✅ |
 | Sides | In the panel, tick USSR on a US rifle, wait a minute, open a USSR arsenal | Rifle listed at its usual price; untick US and the US arsenal loses it | ✅ |
+| Rename | Rename an item in the panel, wait a minute, open an arsenal | New name on the card, hover box and in the inventory; `settings loaded: … 1 renamed` | ⏳ |
+| Nested slots | Fit a rail adapter, then double-click a scope that only fits the rail | Scope in Fits and fitted onto the rail | ⏳ |
+| Accessories | Wear a helmet with a free mount, double-click a helmet light or NVGs | Goes onto the helmet; log `accessory … putting … on worn gear` | ⏳ |
 | Credits | Look under Save / Load | Grey "Zero fucking thanks to Tay and Saber" | ✅ |
 | Modded gear | Load a weapon mod | Right categories, attachments fit | ✅ categories (Bacon Desert Eagle, M110, suppressors, RIS optics: 257 items); patches listed as equipment now go to Clothing ✅ |
 | Dedicated server | Save, restart server, rejoin, Load | Slots still there | ⏳ |
@@ -359,6 +381,8 @@ Status: ✅ verified in Workbench, ⏳ awaiting testing.
 | `OYB_ArsenalLoadouts.c` | Server-side loadout slots, pricing, refunds, respawn kit |
 | `OYB_ArsenalSettings.c` | The panel's hidden items and prices: writes `items.json`, reads `settings.json`, hides items in every arsenal, makes the server refuse them and charge, refund and show the new prices |
 | `OYB_ArsenalAlwaysStocked.c` | Every infantry arsenal offers all infantry gear |
+| `OYB_ArsenalItemNames.c` | Gives renamed items their new name on each player's screen |
+| `OYB_ArsenalPrompt.c` | Every arsenal's open prompt reads "OYB Arsenal" |
 
 An arsenal is usually shown by the **Vicinity** panel
 (`SCR_InventoryStorageLootUI`) and sometimes as an opened storage; both get

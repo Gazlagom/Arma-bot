@@ -3,6 +3,8 @@
 // they've picked another weapon they carry with the Weapon button. Grenades and empty slots are skipped.
 class OYB_TargetWeapon
 {
+	protected static const int MAX_SLOTS = 64;
+
 	protected static IEntity s_Chosen;
 
 	static IEntity Get(IEntity player)
@@ -72,6 +74,54 @@ class OYB_TargetWeapon
 			carried.Insert(weaponEntity);
 		}
 		return carried;
+	}
+
+	// The weapon's attachment slots, and the slots on what's fitted to them (a
+	// rail adapter's own slot for a scope, say), however deep. owners holds the
+	// entity each slot belongs to, the weapon or a fitted part.
+	static void GetSlots(IEntity weaponEntity, notnull array<AttachmentSlotComponent> slots, notnull array<IEntity> owners)
+	{
+		if (!weaponEntity)
+			return;
+
+		BaseWeaponComponent weapon = BaseWeaponComponent.Cast(weaponEntity.FindComponent(BaseWeaponComponent));
+		if (weapon)
+			weapon.GetAttachments(slots);
+		for (int s = 0; s < slots.Count(); s++)
+			owners.Insert(weaponEntity);
+
+		for (int i = 0; i < slots.Count() && slots.Count() < MAX_SLOTS; i++)
+		{
+			if (!slots[i] || !slots[i].GetAttachedEntity())
+				continue;
+
+			IEntity part = slots[i].GetAttachedEntity();
+			array<Managed> found = {};
+			part.FindComponents(AttachmentSlotComponent, found);
+			foreach (Managed component : found)
+			{
+				AttachmentSlotComponent nested = AttachmentSlotComponent.Cast(component);
+				if (nested && !slots.Contains(nested))
+				{
+					slots.Insert(nested);
+					owners.Insert(part);
+				}
+			}
+		}
+	}
+
+	// The storage an arsenal request goes to for a part meant for a slot on this
+	// entity, the weapon or a fitted part.
+	static BaseInventoryStorageComponent GetSlotStorage(IEntity owner)
+	{
+		if (!owner)
+			return null;
+
+		WeaponAttachmentsStorageComponent attachments = WeaponAttachmentsStorageComponent.Cast(owner.FindComponent(WeaponAttachmentsStorageComponent));
+		if (attachments)
+			return attachments;
+
+		return BaseInventoryStorageComponent.Cast(owner.FindComponent(BaseInventoryStorageComponent));
 	}
 
 	static IEntity GetHeld(IEntity player)

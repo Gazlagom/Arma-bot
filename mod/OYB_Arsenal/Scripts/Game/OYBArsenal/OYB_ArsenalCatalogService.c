@@ -320,19 +320,16 @@ class OYB_ArsenalCatalogService
 	// The name the inventory tooltip shows for a prefab.
 	static string OYB_ReadInventoryName(ResourceName prefab)
 	{
-		Resource resource = Resource.Load(prefab);
-		if (!resource || !resource.IsValid())
+		string original = OYB_ItemNames.ReadOriginal(prefab);
+		if (original.IsEmpty())
 			return string.Empty;
 
-		IEntityComponentSource itemSource = SCR_ComponentHelper.GetInventoryItemComponentSource(SCR_BaseContainerTools.FindEntitySource(resource));
-		if (!itemSource)
+		// A mod that forgot its translations leaves the key, like "#MCE-Weapon_Name".
+		string name = WidgetManager.Translate(original);
+		if (name.StartsWith("#"))
 			return string.Empty;
 
-		SCR_ItemAttributeCollection attributes = SCR_ComponentHelper.GetInventoryItemInfo(itemSource);
-		if (!attributes || !attributes.GetUIInfo())
-			return string.Empty;
-
-		return WidgetManager.Translate(attributes.GetUIInfo().GetName());
+		return name;
 	}
 
 	protected array<ref OYB_ArsenalEntry> Build(SCR_ArsenalComponent arsenal)
@@ -375,7 +372,7 @@ class OYB_ArsenalCatalogService
 			// attributes. The catalogue entry prefers the weapon's own name, which
 			// variants share (an M16A2 carbine is still "M16A2" there), so it's only
 			// the fallback.
-			string name = OYB_ReadInventoryName(prefab);
+			string name = OYB_ArsenalSettings.Get().GetDisplayName(prefab);
 			if (name.IsEmpty() && catalogManager)
 			{
 				SCR_EntityCatalogEntry catalogEntry = catalogManager.GetEntryWithPrefabFromAnyCatalog(EEntityCatalogType.ITEM, prefab, faction);
@@ -384,7 +381,7 @@ class OYB_ArsenalCatalogService
 			}
 
 			// The game names an item MISSING when its prefab has no UI info.
-			entry.m_bHasName = !name.IsEmpty() && name != "MISSING";
+			entry.m_bHasName = !name.IsEmpty() && name != "MISSING" && !name.StartsWith("#");
 			if (!entry.m_bHasName)
 			{
 				name = FilePath.StripExtension(FilePath.StripPath(prefab.GetPath()));
@@ -414,7 +411,7 @@ class OYB_ArsenalCatalogService
 			added.m_sPrefab = extraPrefab;
 			added.m_iCategory = extra.m_iCategory;
 			added.m_iSupplyCost = extra.m_iCost;
-			added.m_sName = OYB_ReadInventoryName(extraPrefab);
+			added.m_sName = OYB_ArsenalSettings.Get().GetDisplayName(extraPrefab);
 			added.m_bHasName = !added.m_sName.IsEmpty() && added.m_sName != "MISSING";
 			if (!added.m_bHasName)
 				added.m_sName = FilePath.StripExtension(FilePath.StripPath(extraPrefab.GetPath()));
