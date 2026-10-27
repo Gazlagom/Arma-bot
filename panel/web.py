@@ -2597,13 +2597,13 @@ AMP_STATES = {0: "Stopped", 5: "Getting ready", 7: "Configuring", 10: "Starting"
               40: "Stopping", 45: "Going to sleep", 50: "Asleep", 60: "Waiting", 70: "Installing", 75: "Updating",
               80: "Waiting for input", 100: "Failed", 200: "Suspended", 250: "Maintenance"}
 MANAGE_TABS = (("overview", "Overview", "power"), ("console", "Console", "files"), ("settings", "Settings", "amp_settings"),
-               ("mods", "Mods", "mods"), ("files", "Files", "files"))
+               ("mods", "Mods", "mods"), ("arsenal", "Arsenal", "arsenal"), ("files", "Files", "files"))
 
 
 def manage_tabs(request, inst, current):
     """The sub-tabs along the top of one server's pages, only the ones this person can open."""
     urls = {"overview": f"/manage/{inst}", "console": f"/manage/{inst}/console", "settings": f"/manage/{inst}/settings",
-            "mods": f"/mods/{inst}", "files": f"/files/{inst}"}
+            "mods": f"/mods/{inst}", "arsenal": f"/arsenal/{inst}", "files": f"/files/{inst}"}
     return [{"key": key, "label": label, "url": urls[key], "on": key == current}
             for key, label, perm in MANAGE_TABS if allowed(request, perm)]
 
@@ -3384,6 +3384,242 @@ async def mods_change(request):
     raise web.HTTPFound(back)
 
 
+ARSENAL_PAGE_SIZE = 60
+ARSENAL_SHOW = {"": "Everything", "hidden": "Hidden", "priced": "Price changed",
+                "moved": "Category changed", "sides": "Sides changed", "unlisted": "Unlisted (found by scan)",
+                "added": "Added to the arsenal"}
+
+
+def arsenal_filters(source):
+    """The search, category, faction and show filters from a query or form."""
+    show = source.get("show", "")
+    return {"q": " ".join(source.get("q", "").split())[:80], "cat": source.get("cat", "")[:40],
+            "faction": source.get("faction", "")[:20], "show": show if show in ARSENAL_SHOW else ""}
+
+
+def arsenal_category(item, extras, moved):
+    """The category an item shows under: an added item's, one it was moved to, or its own."""
+    if item["prefab"] in extras:
+        return extras[item["prefab"]]["category"]
+    return moved.get(item["prefab"], item["category"])
+
+
+def arsenal_factions(item, sides):
+    """The factions an item is offered to: the ones picked in the panel, or the mod's own."""
+    return sides.get(item["prefab"], str(item["factions"])).split(",")
+
+
+def arsenal_matches(items, filters, hidden, prices, extras=None, moved=None, sides=None):
+    """The items the filters let through; every search word has to be in the name or prefab."""
+    extras, moved, sides = extras or {}, moved or {}, sides or {}
+    words = filters["q"].lower().split()
+    found = []
+    for item in items:
+        text = (item["name"] + " " + item["prefab"]).lower()
+        if words and not all(word in text for word in words):
+            continue
+        if filters["cat"] and arsenal_category(item, extras, moved) != filters["cat"]:
+            continue
+        if filters["faction"] and filters["faction"] not in arsenal_factions(item, sides):
+            continue
+        if filters["show"] == "hidden" and item["prefab"] not in hidden:
+            continue
+        if filters["show"] == "priced" and item["prefab"] not in prices:
+            continue
+        if filters["show"] == "unlisted" and not item.get("found"):
+            continue
+        if filters["show"] == "added" and item["prefab"] not in extras:
+            continue
+        if filters["show"] == "moved" and item["prefab"] not in moved:
+            continue
+        if filters["show"] == "sides" and item["prefab"] not in sides:
+            continue
+        found.append(item)
+    return found
+
+
+def arsenal_link(inst, filters, page=1):
+    values = dict(filters, page=page if page > 1 else "")
+    return f"/arsenal/{inst}?" + urlencode({k: v for k, v in values.items() if v})
+
+
+async def arsenal_page(request):
+    """Hide items from the OYB Arsenal and change what they cost, per server."""
+    require(request, "arsenal")
+    inst = request.match_info["inst"]
+    base, _ = server_folder(request)
+    error, items, hidden, prices, extras, moved, sides = "", None, set(), {}, {}, {}, {}
+    try:
+        items = files.arsenal_items(base)
+        hidden, prices, extras, moved = files.arsenal_settings(base)
+        sides = files.arsenal_sides(base)
+    except (OSError, ValueError) as exc:
+        error = f"Couldn't read the arsenal files: {exc}"
+    filters = arsenal_filters(request.query)
+    try:
+        page = max(1, int(request.query.get("page", "1")))
+    except ValueError:
+        page = 1
+    found = arsenal_matches(items or [], filters, hidden, prices, extras, moved, sides)
+    pages = max(1, -(-len(found) // ARSENAL_PAGE_SIZE))
+    page = min(page, pages)
+    shown = found[(page - 1) * ARSENAL_PAGE_SIZE:page * ARSENAL_PAGE_SIZE]
+    categories = [c for c in files.ARSENAL_CATEGORIES
+                  if any(arsenal_category(item, extras, moved) == c for item in items or [])]
+    factions = sorted({key for item in items or [] for key in str(item["factions"]).split(",") if key})
+    unlisted = sum(1 for item in items or [] if item.get("found"))
+    age = files.arsenal_items_age(base)
+    return render(request, "arsenal.html", inst=inst, tabs=manage_tabs(request, inst, "arsenal"), error=error,
+                  items=items, shown=shown, found=len(found), hidden=hidden, prices=prices, extras=extras, moved=moved,
+                  sides=sides,
+                  unlisted=unlisted, add_categories=files.ARSENAL_CATEGORIES, filters=filters,
+                  categories=categories, factions=factions, show_options=ARSENAL_SHOW, page=page, pages=pages,
+                  prev_link=arsenal_link(inst, filters, page - 1) if page > 1 else "",
+                  next_link=arsenal_link(inst, filters, page + 1) if page < pages else "",
+                  back=arsenal_link(inst, filters, page), max_price=files.ARSENAL_MAX_PRICE,
+                  listed_at=time.strftime("%Y-%m-%d %H:%M", time.localtime(age)) if age else "")
+
+
+async def arsenal_change(request):
+    require(request, "arsenal")
+    inst = request.match_info["inst"]
+    base, _ = server_folder(request)
+    form = await request.post()
+    action = form.get("action", "")
+    back = form.get("back", "")
+    if not back.startswith(f"/arsenal/{inst}"):
+        back = f"/arsenal/{inst}"
+    try:
+        items = files.arsenal_items(base) or []
+        hidden, prices, extras, moved = files.arsenal_settings(base)
+        sides = files.arsenal_sides(base)
+    except (OSError, ValueError) as exc:
+        flash(request, f"Couldn't read the arsenal files: {exc}", "error")
+        raise web.HTTPFound(back)
+    names = {item["prefab"]: item["name"] for item in items}
+    scanned = {item["prefab"] for item in items if item.get("found")}
+    prefab = form.get("prefab", "")
+    # Only items the server listed, or ones already in the settings (so a removed
+    # mod's leftovers can still be cleared).
+    if (action in ("hide", "show", "price", "reset", "add", "remove_added", "move", "sides", "reset_sides")
+            and prefab not in names and prefab not in hidden and prefab not in prices and prefab not in extras
+            and prefab not in moved and prefab not in sides):
+        flash(request, "That item isn't in this server's arsenal list.", "error")
+        raise web.HTTPFound(back)
+    name = names.get(prefab, prefab.rsplit("/", 1)[-1])
+
+    def read_cost():
+        try:
+            cost = int(form.get("cost", "").strip())
+        except ValueError:
+            cost = -1
+        if not 0 <= cost <= files.ARSENAL_MAX_PRICE:
+            flash(request, f"A price is a whole number from 0 to {files.ARSENAL_MAX_PRICE:,}.", "error")
+            raise web.HTTPFound(back)
+        return cost
+
+    if action == "hide":
+        hidden.add(prefab)
+        message = f"{name} is hidden."
+    elif action == "show":
+        hidden.discard(prefab)
+        message = f"{name} is back in the arsenal."
+    elif action == "price":
+        cost = read_cost()
+        # An added item keeps its price with the rest of its settings.
+        if prefab in extras:
+            extras[prefab]["cost"] = cost
+        else:
+            prices[prefab] = cost
+        message = f"{name} now costs {cost}."
+    elif action == "add":
+        if prefab not in scanned and prefab not in extras:
+            flash(request, "Only items found by the scan need adding; the rest are in the arsenal already.", "error")
+            raise web.HTTPFound(back)
+        cost = read_cost()
+        category = form.get("category", "")
+        faction = form.get("faction", "").strip()
+        if category not in files.ARSENAL_CATEGORIES or not re.fullmatch(r"[A-Za-z0-9_]{0,20}", faction):
+            flash(request, "Pick a category and a faction.", "error")
+            raise web.HTTPFound(back)
+        extras[prefab] = {"cost": cost, "factions": faction, "category": category}
+        message = f"{name} is added to {faction + ' arsenals' if faction else 'every arsenal'} as {category}, costing {cost}."
+    elif action == "remove_added":
+        extras.pop(prefab, None)
+        message = f"{name} is taken out of the arsenal again."
+    elif action in ("move", "move_found"):
+        category = form.get("category", "")
+        if category not in files.ARSENAL_CATEGORIES:
+            flash(request, "Pick a category.", "error")
+            raise web.HTTPFound(back)
+        own = {item["prefab"]: item["category"] for item in items}
+        targets = ([prefab] if action == "move" else
+                   [item["prefab"] for item in arsenal_matches(items, arsenal_filters(form), hidden, prices, extras, moved, sides)])
+        # Items found by the scan get their category when they're added.
+        targets = [target for target in targets if target in extras or target not in scanned]
+        for target in targets:
+            if target in extras:
+                extras[target]["category"] = category
+            elif own.get(target) == category:
+                moved.pop(target, None)          # back where the game put it
+            else:
+                moved[target] = category
+        if action == "move":
+            message = f"{name} is now under {category}."
+        else:
+            message = f"Moved {len(targets)} item{'s' if len(targets) != 1 else ''} to {category}."
+            name = f"{len(targets)} items to {category}"
+    elif action == "reset":
+        prices.pop(prefab, None)
+        message = f"{name} is back to its normal price."
+    elif action in ("sides", "sides_found"):
+        if action == "sides" and (prefab in scanned or prefab in extras):
+            flash(request, "An added item's arsenals are set when it's added.", "error")
+            raise web.HTTPFound(back)
+        known = {key for item in items for key in str(item["factions"]).split(",") if key}
+        picked = sorted(set(form.getall("side", [])))
+        if not picked or not set(picked) <= known:
+            flash(request, "Tick at least one side. To take an item away from everyone, hide it.", "error")
+            raise web.HTTPFound(back)
+        own = {item["prefab"]: str(item["factions"]) for item in items}
+        targets = ([prefab] if action == "sides" else
+                   [item["prefab"] for item in arsenal_matches(items, arsenal_filters(form), hidden, prices, extras, moved, sides)
+                    if item["prefab"] not in scanned and item["prefab"] not in extras])
+        for target in targets:
+            if picked == sorted(key for key in own.get(target, "").split(",") if key):
+                sides.pop(target, None)          # back to what the mod made it
+            else:
+                sides[target] = ",".join(picked)
+        if action == "sides":
+            message = f"{name} is now in {', '.join(picked)} arsenals."
+        else:
+            message = f"{len(targets)} item{'s are' if len(targets) != 1 else ' is'} now in {', '.join(picked)} arsenals."
+            name = f"{len(targets)} items to {', '.join(picked)}"
+    elif action == "reset_sides":
+        sides.pop(prefab, None)
+        message = f"{name} is back on its normal sides."
+    elif action in ("hide_found", "show_found"):
+        found = [item["prefab"] for item in arsenal_matches(items, arsenal_filters(form), hidden, prices, extras, moved, sides)]
+        if action == "hide_found":
+            hidden.update(found)
+            message = f"Hid {len(found)} item{'s' if len(found) != 1 else ''}."
+        else:
+            hidden.difference_update(found)
+            message = f"Showed {len(found)} item{'s' if len(found) != 1 else ''} again."
+        name = f"{len(found)} items"
+    else:
+        raise web.HTTPBadRequest(text="Unknown action.")
+    try:
+        files.save_arsenal_settings(base, hidden, prices, extras, moved, sides)
+    except (files.FileError, OSError) as exc:
+        audit(request, f"arsenal {action}", inst, name, str(exc), ok=False)
+        flash(request, str(exc), "error")
+        raise web.HTTPFound(back)
+    audit(request, f"arsenal {action}", inst, name, prefab)
+    flash(request, message + " The server picks it up within a minute.")
+    raise web.HTTPFound(back)
+
+
 async def instance_power(request):
     """Start or stop a whole AMP instance from the panel."""
     require(request, "power")
@@ -4117,6 +4353,8 @@ def create_app(config: PanelConfig, db: PanelDB | None = None, manager: ServerMa
     app.router.add_post("/instances/{inst}/{action}", instance_power)
     app.router.add_get("/mods/{inst}", mods_page)
     app.router.add_post("/mods/{inst}", mods_change)
+    app.router.add_get("/arsenal/{inst}", arsenal_page)
+    app.router.add_post("/arsenal/{inst}", arsenal_change)
     app.router.add_route("GET", "/console", console_page)
     app.router.add_post("/console", console_page)
     app.router.add_route("GET", "/network", network_page)

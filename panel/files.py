@@ -263,6 +263,110 @@ def save_folder(base):
     return found[0] if found else None
 
 
+def profile_folder(base):
+    """The game's profile folder for this server (what the game calls $profile:), or None."""
+    found = sorted(Path(base).glob("arma-reforger/*/*/profile"))
+    return found[0] if found else None
+
+
+ARSENAL_FOLDER = "OYB_Arsenal"
+ARSENAL_MAX_PRICE = 1_000_000
+# The mod's category names, in its order (OYB_ArsenalCategories.GetName).
+ARSENAL_CATEGORIES = ("Rifles", "Machine guns", "Sniper rifles", "Pistols", "Launchers", "Ammo", "Attachments",
+                      "Clothing", "Vests & bags", "Medical", "Explosives", "Tools", "Other")
+
+
+def arsenal_items(base):
+    """The items the OYB Arsenal mod listed when the server last started, as
+    [{prefab, name, category, factions, price, found}] sorted by name, or None when
+    the server hasn't written the list yet. "found" items are ones the mod's scan
+    of the loaded mods turned up that no faction catalogue lists."""
+    profile = profile_folder(base)
+    path = profile / ARSENAL_FOLDER / "items.json" if profile else None
+    if not path or not path.is_file():
+        return None
+    data = json.loads(path.read_text(encoding="utf-8"))
+    columns = [data.get(key) or [] for key in ("prefabs", "names", "categories", "factions", "prices")]
+    found = list(data.get("found") or [])
+    found += [0] * (len(columns[0]) - len(found))
+    items = [{"prefab": prefab, "name": name or prefab, "category": category, "factions": factions or "",
+              "price": price, "found": bool(scanned)}
+             for prefab, name, category, factions, price, scanned in zip(*columns, found)
+             if isinstance(prefab, str) and prefab]
+    return sorted(items, key=lambda item: (item["name"].lower(), item["prefab"]))
+
+
+def arsenal_items_age(base):
+    """When the server last wrote the item list, as a Unix time, or None."""
+    profile = profile_folder(base)
+    path = profile / ARSENAL_FOLDER / "items.json" if profile else None
+    return path.stat().st_mtime if path and path.is_file() else None
+
+
+def arsenal_price(cost):
+    return isinstance(cost, int) and not isinstance(cost, bool) and 0 <= cost <= ARSENAL_MAX_PRICE
+
+
+def arsenal_settings(base):
+    """(hidden prefabs, {prefab: price}, {prefab: {cost, factions, category}},
+    {prefab: category}) from the server's OYB Arsenal settings. The third are items
+    added to the arsenal that no faction catalogue lists; the last are catalogued
+    items moved to another category."""
+    profile = profile_folder(base)
+    path = profile / ARSENAL_FOLDER / "settings.json" if profile else None
+    if not path or not path.is_file():
+        return set(), {}, {}, {}
+    data = json.loads(path.read_text(encoding="utf-8") or "{}")
+    hidden = {prefab for prefab in data.get("hidden") or [] if isinstance(prefab, str)}
+    prices = {}
+    for prefab, cost in zip(data.get("priceItems") or [], data.get("priceCosts") or []):
+        if isinstance(prefab, str) and arsenal_price(cost):
+            prices[prefab] = cost
+    extras = {}
+    for prefab, cost, factions, category in zip(data.get("extraItems") or [], data.get("extraCosts") or [],
+                                                data.get("extraFactions") or [], data.get("extraCategories") or []):
+        if isinstance(prefab, str) and prefab and arsenal_price(cost) and isinstance(factions, str):
+            extras[prefab] = {"cost": cost, "factions": factions,
+                              "category": category if category in ARSENAL_CATEGORIES else "Other"}
+    moved = {prefab: category for prefab, category in zip(data.get("categoryItems") or [], data.get("categoryNames") or [])
+             if isinstance(prefab, str) and prefab and category in ARSENAL_CATEGORIES}
+    return hidden, prices, extras, moved
+
+
+def arsenal_sides(base):
+    """{prefab: "US,USSR"}: the factions a catalogued item is offered to, where the
+    panel changed them from what the mod made it."""
+    profile = profile_folder(base)
+    path = profile / ARSENAL_FOLDER / "settings.json" if profile else None
+    if not path or not path.is_file():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8") or "{}")
+    return {prefab: factions for prefab, factions in zip(data.get("sideItems") or [], data.get("sideFactions") or [])
+            if isinstance(prefab, str) and prefab and isinstance(factions, str)
+            and re.fullmatch(r"[A-Za-z0-9_]{1,20}(,[A-Za-z0-9_]{1,20})*", factions)}
+
+
+def save_arsenal_settings(base, hidden, prices, extras=None, moved=None, sides=None):
+    """Write the settings the OYB Arsenal mod reads; the server picks them up within a minute."""
+    profile = profile_folder(base)
+    if profile is None:
+        raise FileError("This server has no game profile folder yet. Start it once first.")
+    folder = profile / ARSENAL_FOLDER
+    if not folder.exists():
+        folder.mkdir()
+        hand_over(folder)
+    priced = sorted(prices.items())
+    added = sorted((extras or {}).items())
+    data = {"version": 1, "hidden": sorted(hidden),
+            "priceItems": [prefab for prefab, _ in priced], "priceCosts": [cost for _, cost in priced],
+            "extraItems": [prefab for prefab, _ in added], "extraCosts": [extra["cost"] for _, extra in added],
+            "extraFactions": [extra["factions"] for _, extra in added],
+            "extraCategories": [extra["category"] for _, extra in added],
+            "categoryItems": sorted(moved or {}), "categoryNames": [moved[prefab] for prefab in sorted(moved or {})],
+            "sideItems": sorted(sides or {}), "sideFactions": [sides[prefab] for prefab in sorted(sides or {})]}
+    write_text(folder / "settings.json", json.dumps(data, indent=1) + "\n")
+
+
 def new_game(root, base):
     """Put this server's save aside so its next start is a fresh game. The save is moved
     to a folder of its own, not deleted. Returns where it went, or None if there was none."""
