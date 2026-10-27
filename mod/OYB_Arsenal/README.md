@@ -30,7 +30,7 @@ below. Ownership: `NOTICE.md`.
   "Fits" list and attachment fitting work on the chosen weapon, slung or
   holstered, without switching to it (`OYB_ArsenalTargetWeapon.c`). On a
   controller the Weapon button is the same as Requisition, so the key is
-  hidden there and the weapon in hand is used.
+  hidden there; the < > arrows pick the weapon instead.
 - **Fit attachments in one go** (`OYB_ArsenalWeaponFitting.c`): double-click
   an attachment in the arsenal, or drag it onto the character, and it goes
   straight onto the matching slot of the weapon in your hands. Whatever was in
@@ -51,6 +51,9 @@ below. Ownership: `NOTICE.md`.
   arsenal with the game's own refund. If the new piece doesn't arrive, the old
   one goes back on; if something doesn't fit or the arsenal won't take it
   back, the old piece is left on the ground with its contents.
+- **Body slots**: anything else with its own slot on the character (NVGs in
+  a night vision slot, a watch, binoculars) goes there on a double-click,
+  swapped like clothing if the slot is taken.
 - **Accessories onto worn gear** (also `OYB_ArsenalWeaponFitting.c`):
   double-click a helmet light, NVGs or a vest flashlight and it goes into a
   free spot for it on what you wear (a helmet's mount, or a mount already on
@@ -58,7 +61,8 @@ below. Ownership: `NOTICE.md`.
   spot is taken, the old accessory is swapped out and refunded, like clothing.
 - **Swap weapons in one go** (also `OYB_ArsenalClothing.c`): double-click a
   weapon and it goes into a free weapon slot that takes it; with none free,
-  the weapon in its slot comes off and goes back into the arsenal whole
+  the weapon picked in the bar (if the new one can take its place, else the
+  one in hand or the first that fits) comes off and goes back into the arsenal whole
   (the game's refund covers its fitted parts and loaded magazine) once the
   new one is on. If the new one doesn't arrive, the old one goes back on.
   Grenades still go to pouches.
@@ -342,6 +346,7 @@ Status: ✅ verified in Workbench, ⏳ awaiting testing.
 | Clothing swap | Double-click a jacket with full pockets | Worn, pockets moved, old one returned | ✅ |
 | Clothing into empty slot | Take helmet off, double-click a helmet | Goes on the head | ✅ |
 | Weapon swap | Both weapon slots full, double-click a rifle | Gun in hands replaced, old one returned | ✅ |
+| Picked weapon swap | Pick the tomahawk with the arrows, double-click another melee weapon | Tomahawk replaced, rifle kept | ✅ (Workbench) |
 | Same items together | Double-click a magazine you carry | Goes into the pouch holding the most | ✅ |
 | Save / load | Save a slot, change kit, Load | Kit restored; one log line per press | ✅ |
 | Load key | Press V over the arsenal | Loads the selected slot once; R only switches weapon | ✅ |
@@ -361,8 +366,9 @@ Status: ✅ verified in Workbench, ⏳ awaiting testing.
 | Full arsenal | Open a clothing-only box | Weapons, ammo, equipment and clothing all listed | ✅ |
 | Sides | In the panel, tick USSR on a US rifle, wait a minute, open a USSR arsenal | Rifle listed at its usual price; untick US and the US arsenal loses it | ✅ |
 | Rename | Rename an item in the panel, wait a minute, open an arsenal | New name on the card, hover box and in the inventory; `settings loaded: … 1 renamed` | ⏳ |
-| Nested slots | Fit a rail adapter, then double-click a scope that only fits the rail | Scope in Fits and fitted onto the rail | ⏳ |
-| Accessories | Wear a helmet with a free mount, double-click a helmet light or NVGs | Goes onto the helmet; log `accessory … putting … on worn gear` | ⏳ |
+| Nested slots | Fit a rail adapter, then double-click a scope that only fits the rail | Scope in Fits and fitted onto the rail | ✅ AK74 RIS Rail + Aimpoint (Workbench) |
+| Accessories | Wear a helmet with a free mount, double-click a helmet light or NVGs | Goes onto the helmet; log `accessory … putting … on worn gear` | ✅ PVS-31 onto the OPS Core helmet, and swapped for a GPNVG-18 (Workbench) |
+| Body slots | Double-click NVGs (with a night vision slot, e.g. NV-System), a watch or binoculars | Goes into its slot on the body; a taken slot is swapped | ⏳ |
 | Credits | Look under Save / Load | Grey "Zero fucking thanks to Tay and Saber" | ✅ |
 | Modded gear | Load a weapon mod | Right categories, attachments fit | ✅ categories (Bacon Desert Eagle, M110, suppressors, RIS optics: 257 items); patches listed as equipment now go to Clothing ✅ |
 | Dedicated server | Save, restart server, rejoin, Load | Slots still there | ⏳ |

@@ -257,14 +257,15 @@ modded class SCR_InventoryMenuUI
 		return true;
 	}
 
-	// The weapon slot to swap: the one with the gun in hand if the new weapon can
-	// take its place, otherwise the first carried gun it can replace. A slot
+	// The weapon slot to swap: the one with the weapon picked in the arsenal's
+	// bar (the gun in hand unless another was picked) if the new weapon can take
+	// its place, otherwise the first carried gun it can replace. A slot
 	// counts if the inventory says the new weapon can replace what's there, or
 	// if what's there is the same kind of weapon (rifle for rifle, pistol for
 	// pistol), since weapon slots are set up by kind.
 	protected InventoryStorageSlot OYB_FindWeaponToReplace(IEntity preview, EWeaponType type)
 	{
-		IEntity held = OYB_TargetWeapon.GetHeld(m_Player);
+		IEntity chosen = OYB_TargetWeapon.Get(m_Player);
 		InventoryStorageSlot fallback;
 		for (int i = 0; i < m_pWeaponStorageComp.GetSlotsCount(); i++)
 		{
@@ -277,7 +278,7 @@ modded class SCR_InventoryMenuUI
 			if (!sameKind && !m_InventoryManager.CanReplaceItem(preview, m_pWeaponStorageComp, i))
 				continue;
 
-			if (slot.GetAttachedEntity() == held)
+			if (slot.GetAttachedEntity() == chosen)
 				return slot;
 
 			if (!fallback)
@@ -286,7 +287,6 @@ modded class SCR_InventoryMenuUI
 		return fallback;
 	}
 
-	// See OYB_ArsenalClothing.c.
 	// Accessories that go onto worn gear rather than the body (a helmet light,
 	// NVGs on a helmet mount, a flashlight on a vest) go straight into a free
 	// spot for them on what's worn. Pockets and backpacks don't count, so
@@ -298,7 +298,9 @@ modded class SCR_InventoryMenuUI
 			return false;
 
 		IEntity preview = arsenalSlot.GetInventoryItemComponent().GetOwner();
-		if (!preview || preview.FindComponent(BaseLoadoutClothComponent) || preview.FindComponent(BaseWeaponComponent) || preview.FindComponent(BaseMagazineComponent))
+		// Wearables count too: NVGs are worn items, but with no body slot for them
+		// they go on the helmet's mount.
+		if (!preview || preview.FindComponent(BaseWeaponComponent) || preview.FindComponent(BaseMagazineComponent))
 			return false;
 
 		SCR_CharacterInventoryStorageComponent wearing = m_InventoryManager.GetCharacterStorage();
@@ -335,7 +337,10 @@ modded class SCR_InventoryMenuUI
 					break;
 			}
 			if (!taken)
+			{
+				OYB_ReportNoSpot(worn, preview, arsenalSlot.GetItemResource());
 				return false;
+			}
 		}
 
 		IEntity arsenalEntity = SCR_InventoryStorageBaseUI.ARSENAL_SLOT_STORAGES.Get(arsenalSlot);
@@ -376,7 +381,7 @@ modded class SCR_InventoryMenuUI
 		foreach (Managed component : found)
 		{
 			BaseInventoryStorageComponent storage = BaseInventoryStorageComponent.Cast(component);
-			if (!storage || (!BaseEquipmentStorageComponent.Cast(storage) && !ClothNodeStorageComponent.Cast(storage)))
+			if (!OYB_IsMount(storage))
 				continue;
 
 			InventoryStorageSlot slot = storage.FindSuitableSlotForItem(accessory);
@@ -386,6 +391,60 @@ modded class SCR_InventoryMenuUI
 		return null;
 	}
 
+	// For testing on modded gear: what each worn piece can hold, when an item
+	// found no place on any of them.
+	protected void OYB_ReportNoSpot(notnull array<IEntity> worn, IEntity item, ResourceName resource)
+	{
+		OYB_ArsenalLogLine(string.Format("accessory: no place for %1 on worn gear, checked:", FilePath.StripPath(resource.GetPath())));
+		foreach (IEntity piece : worn)
+		{
+			if (!piece || !piece.GetPrefabData())
+				continue;
+
+			string line = FilePath.StripPath(piece.GetPrefabData().GetPrefabName().GetPath()) + ":";
+			array<Managed> found = {};
+			piece.FindComponents(BaseInventoryStorageComponent, found);
+			foreach (Managed component : found)
+			{
+				BaseInventoryStorageComponent storage = BaseInventoryStorageComponent.Cast(component);
+				if (!storage)
+					continue;
+
+				string fits = "no";
+				if (m_InventoryManager.CanInsertItemInStorage(item, storage, -1))
+					fits = "yes";
+				else if (storage.FindSuitableSlotForItem(item))
+					fits = "taken";
+				line += string.Format(" %1(%2, fits %3)", storage.ClassName(), typename.EnumToString(EStoragePurpose, storage.GetPurpose()), fits);
+			}
+
+			array<Managed> slots = {};
+			piece.FindComponents(AttachmentSlotComponent, slots);
+			if (!slots.IsEmpty())
+				line += string.Format(" %1 attachment slots", slots.Count());
+			OYB_ArsenalLogLine(line);
+		}
+	}
+
+	protected void OYB_ArsenalLogLine(string text)
+	{
+		Print("OYB_ARSENAL " + text);
+	}
+
+	// A storage that holds something on a piece of gear rather than in a pocket:
+	// the game's equipment and cloth node storages, or any storage set up for
+	// attachments or gadgets (how a helmet's NVG mount is often made).
+	protected bool OYB_IsMount(BaseInventoryStorageComponent storage)
+	{
+		if (!storage)
+			return false;
+		if (BaseEquipmentStorageComponent.Cast(storage) || ClothNodeStorageComponent.Cast(storage) || SCR_FilteredInventoryStorageComponent.Cast(storage))
+			return true;
+
+		EStoragePurpose purpose = storage.GetPurpose();
+		return purpose == EStoragePurpose.PURPOSE_EQUIPMENT_ATTACHMENT || purpose == EStoragePurpose.PURPOSE_GADGET_PROXY || purpose == EStoragePurpose.PURPOSE_ATTACHMENT_PROXY;
+	}
+
 	protected void OYB_GetMounted(IEntity piece, notnull array<IEntity> mounted)
 	{
 		array<Managed> found = {};
@@ -393,7 +452,7 @@ modded class SCR_InventoryMenuUI
 		foreach (Managed component : found)
 		{
 			BaseInventoryStorageComponent storage = BaseInventoryStorageComponent.Cast(component);
-			if (!storage || (!BaseEquipmentStorageComponent.Cast(storage) && !ClothNodeStorageComponent.Cast(storage)))
+			if (!OYB_IsMount(storage))
 				continue;
 
 			array<IEntity> items = {};
@@ -427,10 +486,16 @@ modded class SCR_InventoryMenuUI
 		foreach (Managed component : found)
 		{
 			BaseInventoryStorageComponent storage = BaseInventoryStorageComponent.Cast(component);
-			if (!storage || (!BaseEquipmentStorageComponent.Cast(storage) && !ClothNodeStorageComponent.Cast(storage)))
+			if (!storage || !m_InventoryManager.CanInsertItemInStorage(accessory, storage, -1))
 				continue;
-			if (m_InventoryManager.CanInsertItemInStorage(accessory, storage, -1))
+			if (OYB_IsMount(storage))
 				return storage;
+
+			// Seen in testing so a mod's own mount can be recognised.
+			string pieceName;
+			if (piece.GetPrefabData())
+				pieceName = FilePath.StripPath(piece.GetPrefabData().GetPrefabName().GetPath());
+			PrintFormat("OYB_ARSENAL accessory: %1 on %2 takes it but isn't counted as a mount (purpose %3)", storage.ClassName(), pieceName, typename.EnumToString(EStoragePurpose, storage.GetPurpose()));
 		}
 
 		array<Managed> slots = {};
@@ -444,6 +509,8 @@ modded class SCR_InventoryMenuUI
 		return null;
 	}
 
+	// See OYB_ArsenalClothing.c. Anything else with its own place on the body
+	// (NVGs in a night vision slot, a watch, binoculars) goes on the same way.
 	protected bool OYB_EquipClothing(string via)
 	{
 		SCR_ArsenalInventorySlotUI arsenalSlot = SCR_ArsenalInventorySlotUI.Cast(m_pSelectedSlotUI);
@@ -451,7 +518,7 @@ modded class SCR_InventoryMenuUI
 			return false;
 
 		IEntity preview = arsenalSlot.GetInventoryItemComponent().GetOwner();
-		if (!preview || !preview.FindComponent(BaseLoadoutClothComponent) || !m_InventoryManager)
+		if (!preview || preview.FindComponent(BaseWeaponComponent) || preview.FindComponent(BaseMagazineComponent) || !m_InventoryManager)
 			return false;
 
 		SCR_CharacterInventoryStorageComponent wearing = m_InventoryManager.GetCharacterStorage();
@@ -476,7 +543,10 @@ modded class SCR_InventoryMenuUI
 			// The server takes the supplies before it spawns, so don't ask for
 			// something that can't go in.
 			if (!m_InventoryManager.CanInsertItemInStorage(preview, wearing, slot.GetID()))
+			{
+				OYB_ArsenalLogLine(string.Format("wear (%1): %2 has a body slot (%3) but the game won't put it there", via, FilePath.StripPath(arsenalSlot.GetItemResource().GetPath()), slot.GetID()));
 				return false;
+			}
 
 			PrintFormat("OYB_ARSENAL wear (%1): slot empty, requesting %2", via, resource.GetPath());
 			OYB_ArsenalRequest.Request(resourceId, Replication.FindItemId(wearing), resource);
