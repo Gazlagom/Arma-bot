@@ -95,7 +95,7 @@ modded class SCR_CatalogEntitySpawnerComponent
 			PrintFormat("OYB_CORE vehicle limit: %1 has %2/%3 %4, refused %5 for player %6", factionKey, count, limit, group, FilePath.StripPath(entityEntry.GetPrefab().GetPath()), userId);
 			SCR_PlayerController controller = SCR_PlayerController.Cast(GetGame().GetPlayerManager().GetPlayerController(userId));
 			if (controller)
-				controller.OYB_SendVehicleLimitReached(group, count, limit);
+				controller.OYB_SendVehicleLimitReached(OYB_VehicleLimits.DisplayName(group), count, limit);
 			return;
 		}
 
@@ -193,34 +193,5 @@ modded class SCR_BaseGameMode
 	protected void OYB_SendVehicleSettings(int playerId)
 	{
 		OYB_VehicleSettings.Get().SendTo(playerId);
-	}
-}
-
-// Every data block on a catalogue entry, disabled ones too, for the server log
-// when the vehicle list is written.
-modded class SCR_EntityCatalogEntry
-{
-	string OYB_DescribeData()
-	{
-		if (!m_aEntityDataList || m_aEntityDataList.IsEmpty())
-			return "none";
-
-		string text;
-		foreach (SCR_BaseEntityCatalogData data : m_aEntityDataList)
-		{
-			if (!data)
-				continue;
-
-			if (!text.IsEmpty())
-				text += ", ";
-			text += data.Type().ToString();
-			if (!data.IsEnabled())
-				text += " (disabled)";
-
-			SCR_EntityCatalogEditorData editorData = SCR_EntityCatalogEditorData.Cast(data);
-			if (editorData)
-				text += string.Format(" modes %1", editorData.GetValidEditorModes());
-		}
-		return text;
 	}
 }

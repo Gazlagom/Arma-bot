@@ -51,7 +51,7 @@ modded class SCR_CampaignBuildingPlacingEditorComponent
 		PrintFormat("OYB_CORE vehicle limit: %1 has %2/%3 %4, refused %5 for player %6", factionKey, count, limit, group, FilePath.StripPath(prefab.GetPath()), playerID);
 		SCR_PlayerController controller = SCR_PlayerController.Cast(GetGame().GetPlayerManager().GetPlayerController(playerID));
 		if (controller)
-			controller.OYB_SendVehicleLimitReached(group, count, limit);
+			controller.OYB_SendVehicleLimitReached(OYB_VehicleLimits.DisplayName(group), count, limit);
 		return false;
 	}
 
@@ -111,20 +111,14 @@ modded class SCR_CampaignBuildingPlacingEditorComponent
 
 // Hidden vehicles left out of the building menu itself, on each player's game.
 // The server refuses them anyway (above); this only keeps them off the list.
-// Each card's info also learns its prefab, so a price set on the panel is what
-// the card shows (see OYB_VehicleBudget.c).
+// The cards are also matched to their prefabs, so a price set on the panel is
+// what the card shows (see OYB_VehicleBudget.c).
 modded class SCR_ContentBrowserEditorComponent
 {
 	override void FilterEntries()
 	{
 		if (m_aInfos)
-		{
-			foreach (int index, SCR_EditableEntityUIInfo info : m_aInfos)
-			{
-				if (info)
-					info.OYB_SetPrefab(GetResourceNamePrefabID(index));
-			}
-		}
+			OYB_VehicleBudget.NoteCards(m_aInfos, this);
 
 		super.FilterEntries();
 
