@@ -311,6 +311,11 @@ modded class SCR_InventoryStorageBaseUI
 			Print("OYB_ARSENAL no item grid found, filter bar not added", LogLevel.WARNING);
 			return;
 		}
+		if (!OYB_IsInPanel(m_wGrid.GetParent()))
+		{
+			Print("OYB_ARSENAL the item grid isn't inside its panel, filter bar not added", LogLevel.WARNING);
+			return;
+		}
 
 		// Two rows: the category switcher, then a full-width search box. The panel
 		// is only three cards wide, so one row squeezes the search box.
@@ -385,6 +390,14 @@ modded class SCR_InventoryStorageBaseUI
 		if (!gridRow || !gridRow.GetParent())
 			return;
 
+		// Only ever inside this panel: anything added to the menu around it
+		// would outlive the panel.
+		if (!OYB_IsInPanel(gridRow.GetParent()))
+		{
+			Print("OYB_ARSENAL the item grid's row isn't inside the arsenal panel, saved loadouts not added", LogLevel.WARNING);
+			return;
+		}
+
 		WorkspaceWidget workspace = GetGame().GetWorkspace();
 		Widget area = workspace.CreateWidget(WidgetType.VerticalLayoutWidgetTypeID, WidgetFlags.VISIBLE, null, 0, gridRow.GetParent());
 		if (!area)
@@ -457,10 +470,41 @@ modded class SCR_InventoryStorageBaseUI
 		}
 	}
 
+	// When the game closes the panel it takes the handler off, then the panel
+	// out of the menu. Anything still holding a widget of it then keeps that
+	// part alive outside the menu, where it stays on screen, so everything OYB
+	// holds is let go and what it added is removed first.
 	override event void HandlerDeattached(Widget w)
 	{
 		SCR_PlayerController.OYB_GetOnLoadoutNames().Remove(OYB_UpdateLoadoutText);
+		OYB_RemoveAdded();
 		super.HandlerDeattached(w);
+	}
+
+	protected void OYB_RemoveAdded()
+	{
+		m_aOYB_CategoryButtons.Clear();
+		m_aOYB_CategoryCountTexts.Clear();
+		m_aOYB_CategoryAccents.Clear();
+
+		if (m_OYB_Search)
+		{
+			m_OYB_Search.m_OnConfirm.Remove(OYB_OnSearchConfirmed);
+			m_OYB_Search.m_OnWriteModeLeave.Remove(OYB_OnSearchLeft);
+		}
+
+		if (m_wOYB_FilterBar)
+			m_wOYB_FilterBar.RemoveFromHierarchy();
+		if (m_wOYB_LoadoutRow)
+			m_wOYB_LoadoutRow.RemoveFromHierarchy();
+
+		m_wOYB_FilterBar = null;
+		m_wOYB_CategoryColumn = null;
+		m_wOYB_LoadoutRow = null;
+		m_wOYB_WeaponText = null;
+		m_wOYB_LoadoutText = null;
+		m_OYB_WeaponKey = null;
+		m_OYB_Search = null;
 	}
 
 	// V on keyboard (the game's MenuDelete, a click action). Space (MenuDeploy)
@@ -857,6 +901,17 @@ modded class SCR_InventoryStorageBaseUI
 
 	//------------------------------------------------------------------------------------------------
 	// Widget helpers
+
+	protected bool OYB_IsInPanel(Widget widget)
+	{
+		while (widget)
+		{
+			if (widget == m_widget)
+				return true;
+			widget = widget.GetParent();
+		}
+		return false;
+	}
 
 	// AddChild appends, so the widgets from the target onwards are moved to the
 	// end after the new one, which keeps the parent's order otherwise unchanged.
