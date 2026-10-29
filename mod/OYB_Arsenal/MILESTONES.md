@@ -60,3 +60,15 @@ established.
    item is gone from it; switch it on again and it's back.
 4. Regression: open, browse and close the arsenal; take items, fit an
    attachment, save and load a loadout.
+5. Panel teardown: open and close an arsenal several times, then a plain
+   storage. The log shows `OYB_ARSENAL UI panel=… detach complete` for each
+   panel, and no title, category column or loadout row stays on screen.
+6. Big lists: on a server with a large modded arsenal, join as a second
+   player and open an arsenal. The server logs `OYB_ARSENAL settings sent`
+   with the list sizes, and prices and hidden items apply on the client. If
+   they don't, the lists are too big for one message and need splitting.
+7. Non-refundable items: select an item the game won't refund, or one
+   holding such an item. The game turns its Sell button off and the item
+   stays with the player; OYB doesn't change that rule.
+8. Workbench: testing needs a game mode and exactly one faction manager in
+   the world, or the arsenals are empty or the game mode crashes.
