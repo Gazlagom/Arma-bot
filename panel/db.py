@@ -4,8 +4,12 @@ import sqlite3
 import time
 from pathlib import Path
 
+from panel.feedsides import feed_parts, sides_from
+
 FEED_SHOWS = {"joins": ("join", "leave", "side"), "kills": ("kill", "teamkill"), "tks": ("teamkill",), "sus": ("sus",),
               "rcon": ("rcon", "server"), "admin": ()}
+# The rows that name a player, so the ones that get a side chip beside the name.
+MARKED_KINDS = ("join", "leave", "side", "kill", "teamkill")
 
 # Columns added after their table first shipped: older databases get them on start.
 ADDED_COLUMNS = (("server_samples", "sock_drops", "REAL"), ("notes", "edited_by", "TEXT"), ("notes", "edited_at", "INTEGER"), ("warnings", "used_ban", "INTEGER"), ("warnings", "edited_by", "TEXT"), ("warnings", "edited_at", "INTEGER"), ("users", "toured", "INTEGER NOT NULL DEFAULT 0"), ("users", "manage_toured", "INTEGER NOT NULL DEFAULT 0"),
@@ -282,6 +286,12 @@ CREATE TABLE IF NOT EXISTS platforms (
     last_seen INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS platforms_steam ON platforms(steam_id);
+CREATE TABLE IF NOT EXISTS steam_accounts (
+    steam_id TEXT PRIMARY KEY,
+    created INTEGER,
+    state TEXT NOT NULL,
+    checked INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS platforms_read (
     server TEXT NOT NULL,
     folder TEXT NOT NULL,
@@ -795,8 +805,15 @@ class PanelDB:
             parts, args = [events], [server, *kinds, limit]
         else:
             parts, args = [events, actions], [server, limit, server, limit]
-        return self.all(f"SELECT at, kind, text, ip FROM ({' UNION ALL '.join(parts)})"
+        rows = self.all(f"SELECT at, kind, text, ip FROM ({' UNION ALL '.join(parts)})"
                         " ORDER BY at DESC, src, id DESC LIMIT ?", *args, limit)
+        sides = self.sides(server) if any(r["kind"] in MARKED_KINDS for r in rows) else {}
+        return [{**row, "parts": feed_parts(row["kind"], row["text"], sides)} for row in map(dict, rows)]
+
+    def sides(self, server):
+        """The side each player last picked on this server, from the feed's join rows."""
+        return sides_from(r["text"] for r in self.all(
+            "SELECT text FROM feed WHERE server = ? AND kind = 'side' ORDER BY at DESC, id DESC LIMIT 500", server))
 
     def prune_feed(self, days=7, sus_days=180):
         self.write("DELETE FROM feed WHERE at < ? AND (kind != 'sus' OR at < ?)",
@@ -1006,6 +1023,19 @@ class PanelDB:
 
     def platform(self, identity):
         return self.one("SELECT * FROM platforms WHERE identity = ?", identity)
+
+    def joiners(self, server, since):
+        """Who connected to this server since then, newest first, with their platform and whatever
+        is known about their Steam account."""
+        return self.all(
+            "SELECT p.identity, p.name, p.first_seen, p.last_seen, pl.platform, pl.steam_id, sa.created, sa.state, sa.checked"
+            " FROM players p LEFT JOIN platforms pl ON pl.identity = p.identity"
+            " LEFT JOIN steam_accounts sa ON sa.steam_id = pl.steam_id"
+            " WHERE p.last_server = ? AND p.last_seen >= ? ORDER BY p.last_seen DESC LIMIT 100", server, since)
+
+    def save_steam_account(self, steam_id, created, state):
+        self.write("INSERT OR REPLACE INTO steam_accounts (steam_id, created, state, checked) VALUES (?, ?, ?, ?)",
+                   steam_id, created, state, now())
 
     def same_steam(self, steam_id, identity=""):
         """Every other account that joined from this Steam account."""
