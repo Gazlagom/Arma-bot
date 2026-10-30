@@ -8,17 +8,28 @@ import asyncio
 import json
 import re
 import secrets
+import time
 import uuid
 
 import aiohttp
 
 MAX_ADMINS = 20
 TIMEOUT = aiohttp.ClientTimeout(total=15)
+# Most Server manager pages look the instance up before doing anything with it, so the
+# list is kept this long rather than logging in to AMP for it each time.
+INSTANCES_SECONDS = 10
+# A login is used again for this long instead of logging in for every call. AMP can end one
+# sooner; it's then logged in again and the call asked again.
+SESSION_SECONDS = 300
 HEADERS = {"Accept": "application/json", "Content-Type": "application/json", "User-Agent": "OYB-Control"}
 
 
 class AmpError(Exception):
     pass
+
+
+class AmpSessionError(AmpError):
+    """AMP turned the login away before doing anything, so asking again after logging in is safe."""
 
 
 def parse_ids(value) -> list[str]:
@@ -58,12 +69,14 @@ class Amp:
         self.username = username
         self.password = password
         self.nodes = {}
+        self._instances = (0.0, None)
+        self._sessions = {}
 
     async def _post(self, http, base, endpoint, args):
         try:
             async with http.post(f"{base}/API/{endpoint}", data=json.dumps(args), headers=HEADERS) as response:
                 if response.status in (401, 403):
-                    raise AmpError("AMP refused the login. Check the AMP username and password the panel uses.")
+                    raise AmpSessionError("AMP refused the login. Check the AMP username and password the panel uses.")
                 if response.status >= 400:
                     raise AmpError(f"AMP answered {response.status} to {endpoint}.")
                 text = await response.text()
@@ -76,25 +89,41 @@ class Amp:
         except ValueError:
             raise AmpError(f"AMP sent something that isn't JSON for {endpoint}.") from None
         if isinstance(data, dict) and "StackTrace" in data:
+            if "unauthori" in str(data.get("Title", "")).lower():
+                raise AmpSessionError(f"AMP turned the login away on {endpoint}: {data.get('Message') or data['Title']}")
             raise AmpError(f"AMP error on {endpoint}: {data.get('Message') or data.get('Title') or 'unknown'}")
         if isinstance(data, dict) and set(data) == {"result"}:
             data = data["result"]
         return data
 
-    async def _login(self, http, base):
+    async def _login(self, http, base, fresh=False):
+        kept = self._sessions.get(base)
+        if kept and not fresh and time.monotonic() - kept[0] < SESSION_SECONDS:
+            return kept[1]
         result = await self._post(http, base, "Core/Login", {"username": self.username, "password": self.password,
                                                               "token": "", "rememberMe": False})
         if not isinstance(result, dict) or not result.get("success") or not result.get("sessionID"):
             reason = result.get("resultReason") if isinstance(result, dict) else ""
             raise AmpError(f"AMP refused the login{': ' + str(reason) if reason else ''}. "
                            "Check the AMP username and password the panel uses.")
+        self._sessions[base] = (time.monotonic(), result["sessionID"])
         return result["sessionID"]
 
     async def _call(self, http, base, session, endpoint, args=None):
-        return await self._post(http, base, endpoint, {**(args or {}), "SESSIONID": session})
+        kept = self._sessions.get(base)
+        session = kept[1] if kept else session
+        try:
+            return await self._post(http, base, endpoint, {**(args or {}), "SESSIONID": session})
+        except AmpSessionError:
+            self._sessions.pop(base, None)
+            session = await self._login(http, base, fresh=True)
+            return await self._post(http, base, endpoint, {**(args or {}), "SESSIONID": session})
 
     async def instances(self) -> dict:
         """Every instance AMP manages, by its instance name (the folder name under instances/)."""
+        at, found = self._instances
+        if found is not None and time.monotonic() - at < INSTANCES_SECONDS:
+            return dict(found)
         async with aiohttp.ClientSession(timeout=TIMEOUT) as http:
             session = await self._login(http, self.url)
             targets = await self._call(http, self.url, session, "ADSModule/GetInstances", {"ForceIncludeSelf": False})
@@ -103,7 +132,12 @@ class Amp:
             for inst in target.get("AvailableInstances") or []:
                 if inst.get("InstanceName") and inst.get("Module") != "ADS":
                     found[inst["InstanceName"]] = inst
-        return found
+        self._instances = (time.monotonic(), found)
+        return dict(found)
+
+    def forget_instances(self):
+        """After a change to the instances themselves, the next look reads them fresh."""
+        self._instances = (0.0, None)
 
     async def _ads(self, endpoint, args=None):
         async with aiohttp.ClientSession(timeout=TIMEOUT) as http:
@@ -113,6 +147,7 @@ class Amp:
     async def create_instance(self, name, friendly, port, provision):
         """A new instance on this box's ADS, the way AMP's own Create Instance does it.
         AMP picks the game ports itself and downloads the game afterwards."""
+        self.forget_instances()
         targets = await self._ads("ADSModule/GetInstances", {"ForceIncludeSelf": True})
         target = next((t.get("InstanceId") for t in targets if isinstance(t, dict) and t.get("InstanceId")), None) \
             if isinstance(targets, list) else None
@@ -127,6 +162,7 @@ class Amp:
             raise AmpError(f"AMP didn't create {name}: {result.get('Reason') or 'no reason given'}")
 
     async def delete_instance(self, name):
+        self.forget_instances()
         result = await self._ads("ADSModule/DeleteInstance", {"InstanceName": name})
         if isinstance(result, dict) and result.get("Status") is False:
             raise AmpError(f"AMP didn't delete {name}: {result.get('Reason') or 'no reason given'}")
@@ -181,14 +217,16 @@ class Amp:
     async def instance_power(self, name, action):
         """Start or stop a whole AMP instance (its manager, not just the game) through ADS."""
         endpoint = {"start": "ADSModule/StartInstance", "stop": "ADSModule/StopInstance"}[action]
+        self.forget_instances()
         async with aiohttp.ClientSession(timeout=TIMEOUT) as http:
             session = await self._login(http, self.url)
             result = await self._call(http, self.url, session, endpoint, {"InstanceName": name})
         if isinstance(result, dict) and result.get("Status") is False:
             raise AmpError(f"AMP didn't {action} {name}: {result.get('Reason') or 'no reason given'}")
 
-    async def _instance(self, http, inst):
-        """A logged-in way to reach one instance: through ADS first, straight to its own port if that fails."""
+    async def _instance(self, http, inst, fresh=False):
+        """A logged-in way to reach one instance: through ADS first, straight to its own port if that fails.
+        fresh logs in even with a login kept, to find out whether the instance's AMP answers at all."""
         routes = [f"{self.url}/API/ADSModule/Servers/{inst['InstanceID']}"]
         if inst.get("Port"):
             scheme = "https" if inst.get("IsHTTPS") else "http"
@@ -196,7 +234,7 @@ class Amp:
         problem = None
         for base in routes:
             try:
-                return base, await self._login(http, base)
+                return base, await self._login(http, base, fresh)
             except AmpError as exc:
                 problem = exc
         raise problem
@@ -291,9 +329,10 @@ class Amp:
         one whose AMP is off switches that AMP on first and waits for it to answer."""
         endpoint = {"start": "Core/Start", "stop": "Core/Stop", "restart": "Core/Restart",
                     "update": "Core/UpdateApplication"}[action]
+        self.forget_instances()
         async with aiohttp.ClientSession(timeout=TIMEOUT) as http:
             try:
-                base, session = await self._instance(http, inst)
+                base, session = await self._instance(http, inst, fresh=True)
             except AmpError:
                 if action != "start" or inst.get("Running"):
                     raise
@@ -301,7 +340,7 @@ class Amp:
                 for _ in range(max(1, int(wait / max(pause, 0.01)))):
                     await asyncio.sleep(pause)
                     try:
-                        base, session = await self._instance(http, inst)
+                        base, session = await self._instance(http, inst, fresh=True)
                         break
                     except AmpError:
                         continue
