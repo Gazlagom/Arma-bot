@@ -28,9 +28,10 @@ resource name there.
 
 `Scripts/Game/OYBCore/Announcements/OYB_Announcements.c`, set on the OYB
 panel's **Announcements** tab. Each player sees them as a hint box on their own
-screen, never in chat: the title as its heading and one message under it. The
-first shows once they're in the world, then the next every so many minutes, in
-turn (the panel writes its first message as Core's welcome). The panel writes
+screen, never in chat: the title as its heading and a message under it. The
+welcome shows once they're in the world, then the messages every so many
+minutes, in turn. The panel puts all its lines into one message, written as
+both the welcome and the only message, so the same popup shows each time. The panel writes
 `$profile:OYB_Core/announcements.json`; the server reads it when a game starts
 and sends it to each player as they join, so a change applies from the next
 game. The log says `OYB_CORE announcements: welcome 1, N messages every M minutes`.

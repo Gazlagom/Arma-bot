@@ -447,9 +447,9 @@ class FileManagerTests(unittest.IsolatedAsyncioTestCase):
         post = lambda **data: self.client.post("/announcements/Plus01", data={"csrf": token, **data})
         await post(title="Join  our Discord", messages="One\n\n  Two  \nThree\n", every="20")
         saved = json.loads((folder / "announcements.json").read_text())
-        # Core shows its welcome on spawning, then its messages in turn: one loop through all three.
+        # One popup with every message, on spawning and again every 20 minutes.
         self.assertEqual((saved["title"], saved["welcome"], saved["messages"], saved["everyMinutes"]),
-                         ("Join our Discord", "One", ["Two", "Three", "One"], 20))
+                         ("Join our Discord", "One\nTwo\nThree", ["One\nTwo\nThree"], 20))
         await post(title="", messages="x" * 301, every="20")                      # too long
         await post(title="", messages="", every="0")                              # not a time
         self.assertEqual(json.loads((folder / "announcements.json").read_text())["panelMessages"], ["One", "Two", "Three"])

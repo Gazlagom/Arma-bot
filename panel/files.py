@@ -569,8 +569,8 @@ ANNOUNCE_MAX_LENGTH = 300
 
 
 def announcements(base):
-    """The hints OYB Core shows each player: {"title", "messages", "every"} (minutes). Every hint
-    has the title as its heading and one message under it."""
+    """The hints OYB Core shows each player: {"title", "messages", "every"} (minutes). The popup
+    has the title as its heading and every message under it, a line each."""
     found = {"title": "OYB", "messages": [], "every": 30}
     profile = profile_folder(base)
     path = profile / VEHICLE_FOLDER / "announcements.json" if profile else None
@@ -589,9 +589,8 @@ def announcements(base):
 
 
 def save_announcements(base, title, messages, every):
-    """Write the hints OYB Core shows each player from the next game. Core shows its welcome
-    on spawning and then its messages in turn, so the first message is the welcome and the
-    rest follow, ending with the first again: one loop through them all."""
+    """Write the hints OYB Core shows each player from the next game: every message in one
+    popup, a line each, as Core's welcome on spawning and again every so many minutes."""
     profile = profile_folder(base)
     if profile is None:
         raise FileError("This server has no game profile folder yet. Start it once first.")
@@ -599,7 +598,8 @@ def save_announcements(base, title, messages, every):
     if not folder.exists():
         folder.mkdir()
         hand_over(folder)
-    welcome, turns = (messages[0], messages[1:] + messages[:1]) if messages else ("", [])
+    welcome = "\n".join(messages)
+    turns = [welcome] if welcome else []
     data = {"version": 2, "title": title, "welcome": welcome, "messages": turns, "everyMinutes": every,
             "panelMessages": messages}
     write_whole(folder / "announcements.json", json.dumps(data, indent=1) + "\n")
