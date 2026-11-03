@@ -24,6 +24,16 @@ Workbench from a 16:9 PNG; its resource name (GUID from the `.meta`) is
 `OYB_LoadingScreen.IMAGE`. To change the picture, import a new PNG and put its
 resource name there.
 
+## Announcements
+
+`Scripts/Game/OYBCore/Announcements/OYB_Announcements.c`, set on the OYB
+panel's **Announcements** tab. Each player sees them as a hint box on their own
+screen, never in chat: a welcome once they're in the world, then one message
+every so many minutes, in turn. The panel writes
+`$profile:OYB_Core/announcements.json`; the server reads it when a game starts
+and sends it to each player as they join, so a change applies from the next
+game. The log says `OYB_CORE announcements: welcome 1, N messages every M minutes`.
+
 ## Vehicles: hiding and limits
 
 `Scripts/Game/OYBCore/Vehicles/`, driven from the OYB panel's **Vehicles** tab.

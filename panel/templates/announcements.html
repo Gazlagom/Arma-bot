@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}{{ inst }} announcements · OYB Control{% endblock %}
+{% block body %}
+{% include "_manage_tabs.html" %}
+<p class="muted">Messages each player sees as a hint box on their own screen (OYB Core mod), never in chat. The welcome shows once when they're in the world; the others show one at a time, in turn. Changes apply from the next game (a mission restart or a new game).</p>
+{% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+
+<section class="card">
+  <h2>Announcements</h2>
+  <form method="post" action="/announcements/{{ inst }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Title<br><input name="title" maxlength="{{ max_length }}" value="{{ found.title }}"></label>
+    <p><label>Welcome, on joining <span class="muted small">empty for none</span><br>
+      <input name="welcome" maxlength="{{ max_length }}" value="{{ found.welcome }}" placeholder="Welcome to OYB! Join our Discord: discord.gg/..."></label></p>
+    <p><label>Messages, one per line <span class="muted small">up to {{ max_messages }}, empty for none</span><br>
+      <textarea name="messages" rows="6">{{ found.messages|join("\n") }}</textarea></label></p>
+    <p><label>Every <input name="every" type="number" min="1" max="240" step="1" value="{{ found.every }}" class="price"> minutes</label></p>
+    <button>Save</button>
+  </form>
+</section>
+{% endblock %}

@@ -564,6 +564,41 @@ def save_vehicle_costs(base, costs):
     write_whole(folder / "vehicle_costs.json", json.dumps(data, indent=1) + "\n")
 
 
+ANNOUNCE_MAX_MESSAGES = 10
+ANNOUNCE_MAX_LENGTH = 300
+
+
+def announcements(base):
+    """The hints OYB Core shows each player: {"title", "welcome", "messages", "every"} (minutes)."""
+    found = {"title": "OYB", "welcome": "", "messages": [], "every": 30}
+    profile = profile_folder(base)
+    path = profile / VEHICLE_FOLDER / "announcements.json" if profile else None
+    if not path or not path.is_file():
+        return found
+    data = json.loads(path.read_text(encoding="utf-8") or "{}")
+    if isinstance(data.get("title"), str) and data["title"].strip():
+        found["title"] = data["title"]
+    if isinstance(data.get("welcome"), str):
+        found["welcome"] = data["welcome"]
+    found["messages"] = [m for m in data.get("messages") or [] if isinstance(m, str) and m.strip()]
+    if isinstance(data.get("everyMinutes"), int) and not isinstance(data["everyMinutes"], bool):
+        found["every"] = data["everyMinutes"]
+    return found
+
+
+def save_announcements(base, title, welcome, messages, every):
+    """Write the hints OYB Core shows each player from the next game."""
+    profile = profile_folder(base)
+    if profile is None:
+        raise FileError("This server has no game profile folder yet. Start it once first.")
+    folder = profile / VEHICLE_FOLDER
+    if not folder.exists():
+        folder.mkdir()
+        hand_over(folder)
+    data = {"version": 1, "title": title, "welcome": welcome, "messages": messages, "everyMinutes": every}
+    write_whole(folder / "announcements.json", json.dumps(data, indent=1) + "\n")
+
+
 def new_game(root, base):
     """Put this server's save aside so its next start is a fresh game. The save is moved
     to a folder of its own, not deleted. Returns where it went, or None if there was none."""
