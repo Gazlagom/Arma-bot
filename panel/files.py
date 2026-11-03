@@ -569,8 +569,9 @@ ANNOUNCE_MAX_LENGTH = 300
 
 
 def announcements(base):
-    """The hints OYB Core shows each player: {"title", "welcome", "messages", "every"} (minutes)."""
-    found = {"title": "OYB", "welcome": "", "messages": [], "every": 30}
+    """The hints OYB Core shows each player: {"title", "messages", "every"} (minutes). Every hint
+    has the title as its heading and one message under it."""
+    found = {"title": "OYB", "messages": [], "every": 30}
     profile = profile_folder(base)
     path = profile / VEHICLE_FOLDER / "announcements.json" if profile else None
     if not path or not path.is_file():
@@ -578,16 +579,19 @@ def announcements(base):
     data = json.loads(path.read_text(encoding="utf-8") or "{}")
     if isinstance(data.get("title"), str) and data["title"].strip():
         found["title"] = data["title"]
-    if isinstance(data.get("welcome"), str):
-        found["welcome"] = data["welcome"]
-    found["messages"] = [m for m in data.get("messages") or [] if isinstance(m, str) and m.strip()]
+    listed = data.get("panelMessages")
+    if not isinstance(listed, list):
+        listed = [data.get("welcome")] + list(data.get("messages") or [])
+    found["messages"] = [m for m in listed if isinstance(m, str) and m.strip()]
     if isinstance(data.get("everyMinutes"), int) and not isinstance(data["everyMinutes"], bool):
         found["every"] = data["everyMinutes"]
     return found
 
 
-def save_announcements(base, title, welcome, messages, every):
-    """Write the hints OYB Core shows each player from the next game."""
+def save_announcements(base, title, messages, every):
+    """Write the hints OYB Core shows each player from the next game. Core shows its welcome
+    on spawning and then its messages in turn, so the first message is the welcome and the
+    rest follow, ending with the first again: one loop through them all."""
     profile = profile_folder(base)
     if profile is None:
         raise FileError("This server has no game profile folder yet. Start it once first.")
@@ -595,7 +599,9 @@ def save_announcements(base, title, welcome, messages, every):
     if not folder.exists():
         folder.mkdir()
         hand_over(folder)
-    data = {"version": 1, "title": title, "welcome": welcome, "messages": messages, "everyMinutes": every}
+    welcome, turns = (messages[0], messages[1:] + messages[:1]) if messages else ("", [])
+    data = {"version": 2, "title": title, "welcome": welcome, "messages": turns, "everyMinutes": every,
+            "panelMessages": messages}
     write_whole(folder / "announcements.json", json.dumps(data, indent=1) + "\n")
 
 

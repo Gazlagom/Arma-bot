@@ -3941,11 +3941,11 @@ async def vehicles_change(request):
 
 
 async def announcements_page(request):
-    """The hints OYB Core shows each player: a welcome, then messages in turn."""
+    """The hints OYB Core shows each player: a heading, and one message at a time under it."""
     require_on(request, "announcements")
     inst = request.match_info["inst"]
     base, _ = server_folder(request)
-    error, found = "", {"title": "OYB", "welcome": "", "messages": [], "every": 30}
+    error, found = "", {"title": "OYB", "messages": [], "every": 30}
     try:
         found = files.announcements(base)
     except (OSError, ValueError) as exc:
@@ -3966,7 +3966,6 @@ async def announcements_change(request):
         raise web.HTTPFound(back)
 
     title = " ".join(form.get("title", "").split()) or "OYB"
-    welcome = " ".join(form.get("welcome", "").split())
     messages = [" ".join(line.split()) for line in form.get("messages", "").splitlines() if line.strip()]
     try:
         every = int(form.get("every", "").strip())
@@ -3976,14 +3975,14 @@ async def announcements_change(request):
         fail("How often is a whole number of minutes from 1 to 240.")
     if len(messages) > files.ANNOUNCE_MAX_MESSAGES:
         fail(f"At most {files.ANNOUNCE_MAX_MESSAGES} messages.")
-    if any(len(text) > files.ANNOUNCE_MAX_LENGTH for text in [title, welcome, *messages]):
+    if any(len(text) > files.ANNOUNCE_MAX_LENGTH for text in [title, *messages]):
         fail(f"Each message is at most {files.ANNOUNCE_MAX_LENGTH} letters.")
     try:
-        files.save_announcements(base, title, welcome, messages, every)
+        files.save_announcements(base, title, messages, every)
     except (files.FileError, OSError) as exc:
         audit(request, "announcements", inst, "", str(exc), ok=False)
         fail(f"The server's file couldn't be written: {exc}")
-    audit(request, "announcements", inst, "", f"welcome {'on' if welcome else 'off'}, {len(messages)} messages every {every} min")
+    audit(request, "announcements", inst, "", f"{len(messages)} messages every {every} min")
     flash(request, "Saved. Restart the mission or start a new game for it to apply.")
     raise web.HTTPFound(back)
 

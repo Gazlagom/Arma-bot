@@ -445,15 +445,16 @@ class FileManagerTests(unittest.IsolatedAsyncioTestCase):
         page = await (await self.client.get("/announcements/Plus01")).text()
         self.assertIn(">Announcements</a>", page)
         post = lambda **data: self.client.post("/announcements/Plus01", data={"csrf": token, **data})
-        await post(title="OYB", welcome="Welcome!  Join our Discord", messages="One\n\n  Two  \n", every="20")
+        await post(title="Join  our Discord", messages="One\n\n  Two  \nThree\n", every="20")
         saved = json.loads((folder / "announcements.json").read_text())
+        # Core shows its welcome on spawning, then its messages in turn: one loop through all three.
         self.assertEqual((saved["title"], saved["welcome"], saved["messages"], saved["everyMinutes"]),
-                         ("OYB", "Welcome! Join our Discord", ["One", "Two"], 20))
-        await post(title="", welcome="", messages="x" * 301, every="20")          # too long
-        await post(title="", welcome="", messages="", every="0")                  # not a time
-        self.assertEqual(json.loads((folder / "announcements.json").read_text())["messages"], ["One", "Two"])
+                         ("Join our Discord", "One", ["Two", "Three", "One"], 20))
+        await post(title="", messages="x" * 301, every="20")                      # too long
+        await post(title="", messages="", every="0")                              # not a time
+        self.assertEqual(json.loads((folder / "announcements.json").read_text())["panelMessages"], ["One", "Two", "Three"])
         page = await (await self.client.get("/announcements/Plus01")).text()
-        self.assertIn("One\nTwo</textarea>", page)
+        self.assertIn("One\nTwo\nThree</textarea>", page)
         await self.login("chief")
         self.assertEqual((await self.client.get("/announcements/Plus01")).status, 403)
 
