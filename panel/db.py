@@ -314,6 +314,22 @@ CREATE TABLE IF NOT EXISTS base_names (
     name TEXT NOT NULL,
     PRIMARY KEY (server, base)
 );
+DROP TABLE IF EXISTS player_loadouts;
+DROP TABLE IF EXISTS loadout_classes;
+CREATE TABLE IF NOT EXISTS saved_loadouts (
+    identity TEXT NOT NULL,
+    kit TEXT NOT NULL,
+    title TEXT NOT NULL,
+    side TEXT,
+    loadout TEXT NOT NULL,
+    times INTEGER NOT NULL,
+    last INTEGER NOT NULL,
+    PRIMARY KEY (identity, kit)
+);
+CREATE TABLE IF NOT EXISTS loadout_saves (
+    server TEXT PRIMARY KEY,
+    saved INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS game_base_names (
     server TEXT NOT NULL,
     game INTEGER NOT NULL,
@@ -1069,6 +1085,25 @@ class PanelDB:
             self.db.commit()
             known.update(new)
         return known
+
+    def loadout_save_read(self, server):
+        """The time of the last autosave whose loadouts were counted for this server, 0 if none."""
+        row = self.one("SELECT saved FROM loadout_saves WHERE server = ?", server)
+        return row["saved"] if row else 0
+
+    def add_loadouts(self, server, saved, rows, online):
+        """Count one more time on the saved loadout of each player on now, keeping what's in it."""
+        self.db.executemany(
+            "INSERT INTO saved_loadouts VALUES (?, ?, ?, ?, ?, 1, ?) ON CONFLICT(identity, kit)"
+            " DO UPDATE SET times = times + 1, last = excluded.last, side = excluded.side",
+            [(r["identity"], r["kit"], r["title"], r["side"], r["loadout"], saved) for r in rows if r["identity"] in online])
+        self.db.execute("INSERT OR REPLACE INTO loadout_saves VALUES (?, ?)", (server, saved))
+        self.db.commit()
+
+    def loadouts(self, identity):
+        """Every saved loadout a player has been on with, most used first, then newest."""
+        return [dict(r) for r in self.all("SELECT * FROM saved_loadouts WHERE identity = ? ORDER BY times DESC, last DESC",
+                                          identity)]
 
     def map_kills(self, server, since, limit=3000):
         """Kills with a place on the map, newest first."""
