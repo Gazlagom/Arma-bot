@@ -455,6 +455,12 @@ class FileManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads((folder / "announcements.json").read_text())["panelMessages"], ["One", "Two", "Three"])
         page = await (await self.client.get("/announcements/Plus01")).text()
         self.assertIn("One\nTwo\nThree</textarea>", page)
+        await post(action="players", afk="15", afk_players="20", teamkill="No  teamkilling", rules="1. Be nice  \r\n2. No TK\r\n")
+        saved = json.loads((folder / "players.json").read_text())
+        self.assertEqual((saved["afkMinutes"], saved["afkMinPlayers"], saved["teamkillMessage"], saved["rules"]),
+                         (15, 20, "No teamkilling", "1. Be nice\n2. No TK"))
+        await post(action="players", afk="-1", afk_players="0", teamkill="")         # not a time
+        self.assertEqual(json.loads((folder / "players.json").read_text())["afkMinutes"], 15)
         await self.login("chief")
         self.assertEqual((await self.client.get("/announcements/Plus01")).status, 403)
 

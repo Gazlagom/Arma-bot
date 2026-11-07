@@ -17,4 +17,20 @@
     <button>Save</button>
   </form>
 </section>
+
+<section class="card">
+  <h2>Rules, AFK kick and teamkills</h2>
+  <form method="post" action="/announcements/{{ inst }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="action" value="players">
+    <p><label>Rules <span class="muted small">a box each player has to press OK on when they join; shown again only after you change them; empty for none</span><br>
+      <textarea name="rules" rows="8" maxlength="{{ rules_max }}">{{ players.rules }}</textarea></label></p>
+    <p><label>Kick players AFK for <input name="afk" type="number" min="0" max="240" step="1" value="{{ players.afk }}" class="price"> minutes</label>
+      <span class="muted small">0 is off. Not moving and not looking around counts as AFK, on the deploy screen too. They get a warning a minute before. Admins and Game Masters are never kicked.</span></p>
+    <p><label>Only when <input name="afk_players" type="number" min="0" max="256" step="1" value="{{ players.afk_players }}" class="price"> or more players are on</label>
+      <span class="muted small">0 is always.</span></p>
+    <p><label>Teamkill popup <span class="muted small">shown to the killer straight away; empty for none</span><br>
+      <input name="teamkill" maxlength="{{ max_length }}" value="{{ players.teamkill }}"></label></p>
+    <button>Save</button>
+  </form>
+</section>
 {% endblock %}

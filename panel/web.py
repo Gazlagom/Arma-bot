@@ -26,7 +26,7 @@ from bot.mortar.solution import OUT_OF_RANGE, apply_wind, bearing, parse_grid, p
 from bot.mortar.wind import Wind
 
 from bot.ranks.rank_rules import RANKS, SECONDS_PER_XP, XP_PER_TEAMKILL
-from . import archive, attacks, auth, ballistics, console, files, investigate, joiners, maptiles, memory, mobs, monitor, netcheck, outliers, site, steamage, whois, workshop, xlsx
+from . import archive, attacks, auth, ballistics, campaign_save, console, files, investigate, joiners, maptiles, memory, mobs, monitor, netcheck, outliers, site, steamage, whois, workshop, xlsx
 from .amp import GAME_NODE, MAX_ADMINS, Amp, AmpError, instance_name as amp_instance_name, parse_ids
 from .alerts import GOLD, GREEN, RED
 from .config import PanelConfig
@@ -2191,6 +2191,32 @@ def game_start(state):
     return folder_start(folder) if folder else None
 
 
+def place_key(name):
+    return re.sub(r"[^a-z]", "", name.lower().replace("base", ""))
+
+
+def base_control(state, db):
+    """Who holds each base, from the newest autosave of the game now running; None when there isn't one."""
+    if not state.config.log_dir:
+        return None
+    found = campaign_save.newest(state.config.log_dir)
+    start = game_start(state)
+    # A save left from the game before this one doesn't count.
+    if not found or (start and found[1] < start - 60):
+        return None
+    read = campaign_save.read(found[0])
+    if not read:
+        return None
+    known = db.base_names(state.config.id, read["names"])
+    places = {place_key(p["name"]): p["name"] for p in mobs.places()}
+    counts, held = {}, []
+    for base, side in read["bases"]:
+        counts[side or "none"] = counts.get(side or "none", 0) + 1
+        name = campaign_save.label(known[base]) if base in known else None
+        held.append({"side": side, "name": name, "place": places.get(place_key(name)) if name else None})
+    return {"saved": found[1], "counts": counts, "bases": held}
+
+
 async def control_kills(request):
     state = server_or_404(request, request.match_info["id"])
     key = request.query.get("range", "game")
@@ -2199,6 +2225,7 @@ async def control_kills(request):
     rows = request.app[DB].map_kills(state.config.id, since, KILL_MAP_LIMIT)
     folder = game_folder(state)
     return web.json_response({"capped": len(rows) == KILL_MAP_LIMIT, "bases": mobs.read(folder / "console.log") if folder else [],
+                              "control": base_control(state, request.app[DB]),
                               "kills": [{
         "at": r["at"], "teamkill": r["kind"] == "teamkill", "ai": not r["killer"],
         "killer": r["killer_name"] or "", "killer_id": r["killer"], "victim": r["victim_name"], "victim_id": r["victim"],
@@ -3946,12 +3973,14 @@ async def announcements_page(request):
     inst = request.match_info["inst"]
     base, _ = server_folder(request)
     error, found = "", {"title": "OYB", "messages": [], "every": 30}
+    players = {"afk": 0, "afk_players": 0, "teamkill": files.TEAMKILL_MESSAGE, "rules": ""}
     try:
         found = files.announcements(base)
+        players = files.player_settings(base)
     except (OSError, ValueError) as exc:
-        error = f"Couldn't read the announcements file: {exc}"
+        error = f"Couldn't read the OYB Core files: {exc}"
     return render(request, "announcements.html", inst=inst, tabs=manage_tabs(request, inst, "announcements"), error=error,
-                  found=found, max_messages=files.ANNOUNCE_MAX_MESSAGES, max_length=files.ANNOUNCE_MAX_LENGTH)
+                  found=found, players=players, rules_max=files.RULES_MAX_LENGTH, max_messages=files.ANNOUNCE_MAX_MESSAGES, max_length=files.ANNOUNCE_MAX_LENGTH)
 
 
 async def announcements_change(request):
@@ -3963,6 +3992,28 @@ async def announcements_change(request):
 
     def fail(text):
         flash(request, text, "error")
+        raise web.HTTPFound(back)
+
+    if form.get("action") == "players":
+        try:
+            afk, afk_players = int(form.get("afk", "").strip() or 0), int(form.get("afk_players", "").strip() or 0)
+        except ValueError:
+            afk = afk_players = -1
+        if not 0 <= afk <= 240 or not 0 <= afk_players <= 256:
+            fail("AFK minutes are 0 to 240 (0 is off), players 0 to 256.")
+        teamkill = " ".join(form.get("teamkill", "").split())
+        if len(teamkill) > files.ANNOUNCE_MAX_LENGTH:
+            fail(f"The teamkill message is at most {files.ANNOUNCE_MAX_LENGTH} letters.")
+        rules = "\n".join(line.rstrip() for line in form.get("rules", "").strip().splitlines())
+        if len(rules) > files.RULES_MAX_LENGTH:
+            fail(f"The rules are at most {files.RULES_MAX_LENGTH} letters.")
+        try:
+            files.save_player_settings(base, afk, afk_players, teamkill, rules)
+        except (files.FileError, OSError) as exc:
+            audit(request, "announcements players", inst, "", str(exc), ok=False)
+            fail(f"The server's file couldn't be written: {exc}")
+        audit(request, "announcements players", inst, "", f"AFK {afk} min with {afk_players}+ on, teamkill {'on' if teamkill else 'off'}, rules {'on' if rules else 'off'}")
+        flash(request, "Saved. Restart the mission or start a new game for it to apply.")
         raise web.HTTPFound(back)
 
     title = " ".join(form.get("title", "").split()) or "OYB"
