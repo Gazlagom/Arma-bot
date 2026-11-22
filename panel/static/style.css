@@ -701,6 +701,9 @@ b.na { color: var(--muted); font-family: var(--body); font-size: .85rem; font-we
 .ctl-legend .t { background: #e0443a; }
 .ctl-legend .a { background: #b18cff; }
 .ctl-legend .p { background: #fff; border: 2px solid #3f78c4; box-sizing: border-box; }
+.ctl-legend .v { background: #8a8f96; border-radius: 2px; }
+.ctl-legend .m { background: #ffd23f; border-radius: 0; transform: rotate(45deg) scale(.8); }
+.ctl-legend .g { background: #e0443a; border-radius: 0; clip-path: polygon(50% 0, 100% 100%, 0 100%); }
 .place, .mob { overflow: visible; pointer-events: none; }
 .place i { position: absolute; left: -4px; top: -4px; width: 8px; height: 8px; background: #f5f6f8; border: 1.5px solid #0d1013; transform: rotate(45deg); box-shadow: 0 0 0 1px rgba(255, 255, 255, .35); }
 .place.tower i { border-radius: 50%; }
@@ -723,13 +726,24 @@ b.na { color: var(--muted); font-family: var(--body); font-size: .85rem; font-we
 .mob-ru { --mob: #c0392b; }
 .mob-fia { --mob: #4f9a47; }
 .pin { overflow: visible; --pin: #8a8f96; }
-.pin i { position: absolute; left: -6px; top: -6px; width: 12px; height: 12px; border-radius: 50%; background: var(--pin); border: 2px solid #fff; box-shadow: 0 0 6px rgba(0, 0, 0, .6); }
-.pin b { position: absolute; left: 9px; top: -9px; padding: 0 5px; border-radius: 3px; background: rgba(13, 16, 19, .8); color: #fff; font: 600 11px/1.5 var(--body); white-space: nowrap; pointer-events: none; }
+.pin i { position: absolute; left: -5px; top: -5px; width: 10px; height: 10px; border-radius: 50%; background: var(--pin); border: 1.5px solid #fff; box-shadow: 0 0 4px rgba(0, 0, 0, .6); }
+.pin b { display: none; position: absolute; left: 8px; top: -8px; padding: 0 4px; border-radius: 3px; background: rgba(13, 16, 19, .7); color: #fff; font: 600 10px/1.5 var(--body); white-space: nowrap; pointer-events: none; }
+#ctl-map.map-near .pin b, .pin:hover b { display: block; }
+.pin:hover { z-index: 9999 !important; }
+@media (pointer: coarse) {
+  .pin i { left: -7px; top: -7px; width: 14px; height: 14px; }
+  .thing i { left: -7px; top: -7px; width: 14px; height: 14px; }
+}
 .pin-us { --pin: #3f78c4; }
 .pin-ru { --pin: #c0392b; }
 .pin-fia { --pin: #4f9a47; }
 .pin-off i { opacity: .45; border-color: #c9ccd0; }
 .pin-dead i { background: #0d1013; border-color: var(--pin); }
+.thing { overflow: visible; --pin: #8a8f96; }
+.thing i { position: absolute; left: -5px; top: -5px; width: 10px; height: 10px; background: var(--pin); border: 1.5px solid #fff; box-shadow: 0 0 4px rgba(0, 0, 0, .6); }
+.thing-car i { border-radius: 2px; }
+.thing-mine i { left: -4px; top: -4px; width: 8px; height: 8px; background: #ffd23f; border-color: #0d1013; transform: rotate(45deg); }
+.thing-gun i { background: #e0443a; clip-path: polygon(50% 0, 100% 100%, 0 100%); border: 0; width: 12px; height: 12px; left: -6px; top: -6px; }
 .leaflet-interactive.ctl-kill { stroke: #fff; stroke-width: 1.5; fill-opacity: .95; }
 .leaflet-interactive.ctl-kill.k { fill: #f47b20; }
 .leaflet-interactive.ctl-kill.t { fill: #e0443a; }
@@ -1494,8 +1508,14 @@ body.app .side-nav a, body.app .side-group summary, body.app .side-off { font-si
 body.map-open { overflow: hidden; }
 @media (max-width: 720px) {
   .dash #ctl-map, #ctl-map { height: min(65vh, 440px); }
-  .map-range, .map-tools select, .map-tools .chip, .map-layers { font-size: .85rem; padding: 6px 10px; }
-  .map-tools { top: 48px; }
+  .map-range, .map-tools select, .map-tools .chip { font-size: .85rem; padding: 6px 10px; }
+  /* On a phone the layer buttons are one scrolling row above the map instead of a box over it. */
+  .map-wrap, .ctl-map-panel.map-full-on .map-wrap { display: flex; flex-direction: column; }
+  .map-layers { display: none; }
+  .map-tools, .map-tools-open .map-tools { display: flex; position: static; order: -1; flex-direction: row; flex-wrap: nowrap; overflow-x: auto;
+    gap: 6px; padding: 0 0 8px; background: none; border: 0; border-radius: 0; scrollbar-width: none; }
+  .map-tools::-webkit-scrollbar { display: none; }
+  .map-tools select, .map-tools .chip { flex: none; white-space: nowrap; }
   .ctl-map-panel.map-full-on { padding: 8px; }
 }
 
@@ -1840,3 +1860,4 @@ form.rename input[name=name] { display: inline-block; width: 12em; margin: 0; pa
 .kit { padding-left: 0; columns: 2 260px; }
 .kit > li { break-inside: avoid; margin-bottom: 6px; }
 .kit ul li { color: var(--muted, #9aa3ad); font-size: .92em; }
+.kit-count { font-weight: 600; }
