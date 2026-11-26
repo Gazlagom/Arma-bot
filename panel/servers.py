@@ -12,16 +12,40 @@ from pathlib import Path
 
 from .config import PanelConfig, ServerConfig
 from . import alerts as alert_colours, archive, attacks, campaign_save, carried, loadouts, memory, monitor, netcheck
+from . import save_checks, save_history
 from collections import Counter
 from .alerts import Alerts
 from .connections import LogReader
 from .db import PanelDB, now
-from .rcon import RconClient, RconError
+from .rcon import RconClient, RconError, RconReply
 from bot.discord import welcome_doc
 from bot.discord.ban_roles import length_text
 from .suspicion import DEFAULTS, Detector, check_settings
 from .resend_watch import ResendWatch
 from .tk_burst import IGNORED_DAMAGE, TkBurst
+
+# How much of the log end a crash report shows: enough to see what went wrong, short enough for Discord.
+CRASH_LINES = 25
+CRASH_CHARS = 3200
+
+
+def last_log_lines(log_dir, lines=CRASH_LINES):
+    """The end of the newest console.log under a server's log folder, trimmed to fit a staff alert."""
+    folders = LogReader(log_dir).folders()
+    if not folders:
+        return ""
+    try:
+        with open(folders[-1] / "console.log", "rb") as log:
+            log.seek(0, 2)
+            log.seek(max(log.tell() - 65536, 0))
+            text = log.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+    tail = [line.rstrip()[:160] for line in text.splitlines()[-lines:]]
+    while tail and len("\n".join(tail)) > CRASH_CHARS:
+        tail.pop(0)
+    return "\n".join(tail).replace("```", "'" * 3)
+
 
 PLAYER_ROW = re.compile(r"\d+\s*;\s*[0-9a-fA-F]{8}-[0-9a-fA-F-]{27}\s*;")
 
@@ -106,10 +130,21 @@ class ServerState:
     recent: dict = field(default_factory=dict)
     running: dict = field(default_factory=dict)
     tk_burst: TkBurst = field(default_factory=TkBurst)
+    # Gunfire teamkills only, for the automatic kick and ban.
+    tk_gunfire: TkBurst = field(default_factory=TkBurst)
     punished: dict = field(default_factory=dict)
     # Stacked saved loadouts this game: {identity: {'alerted', 'kicked', 'banned'}}, cleared when the game changes.
     loadout_game: int = 0
     loadout_flags: dict = field(default_factory=dict)
+    # Live kills for the autosave checks, (at, killer identity, kind, damage), the last 12 hours.
+    kill_log: list = field(default_factory=list)
+    # Autosave check alerts already sent this game, and the vehicles wrecked at their own main base.
+    save_game: int = 0
+    save_alerted: set = field(default_factory=set)
+    home_wrecks: list = field(default_factory=list)
+    evasion_alerted: dict = field(default_factory=dict)
+    # The side each player last joined in the log, for the players-per-side chart.
+    sides: dict = field(default_factory=dict)
     admins: list = field(default_factory=list)
     # Since the last Monitor reading: disconnects by reason, and script errors.
     disconnects: Counter = field(default_factory=Counter)
@@ -136,6 +171,7 @@ ATTACK_LOGINS = 10
 ATTACK_WINDOW = 600
 # A saved game log is deleted after this long, as kills are; the game stays listed with its numbers.
 ARCHIVE_DAYS = 180
+KILL_LOG_SECONDS = 12 * 3600
 
 
 class ServerManager:
@@ -301,6 +337,9 @@ class ServerManager:
                "disconnects": sum(state.disconnects.values()), "errors": state.errors,
                "reasons": json.dumps(dict(state.disconnects)) if state.disconnects else None}
         state.disconnects, state.errors = Counter(), 0
+        if state.online:
+            on = Counter(state.sides.get(p.get("identity")) for p in state.players if p.get("identity"))
+            row.update(side_us=on["US"], side_ussr=on["USSR"], side_fia=on["FIA"])
         pid = state.pid or state.found_pid
         ticks = monitor.read_process(pid, proc_root) if pid else None
         row["proc_cpu"] = monitor.process_cpu(state.cpu_ticks, ticks) \
@@ -367,6 +406,12 @@ class ServerManager:
                 raise
             except Exception:
                 log.exception("reading loadouts failed for %s", state.config.id)
+            try:
+                await self.record_save(state)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("keeping the autosave failed for %s", state.config.id)
             await asyncio.sleep(LOADOUT_POLL)
 
     async def read_loadouts(self, state: ServerState):
@@ -391,6 +436,46 @@ class ServerManager:
         online = {p.get("identity") for p in state.players if p.get("identity")}
         self.db.add_loadouts(state.config.id, found[1], rows, online)
         await self.stacked_loadouts(state, found[1], found[2], stacked, online)
+
+    async def record_save(self, state: ServerState):
+        """Keep what a new autosave says about the game, so later checks can compare one save with the next."""
+        found = campaign_save.newest(state.config.log_dir) if state.config.log_dir else None
+        last = self.db.last_save_point(state.config.id)
+        if not found or (last and found[1] <= last["saved"]):
+            return
+        read = await asyncio.to_thread(save_history.read, found[0])
+        if read is None:
+            return
+        game = found[2] or found[1]
+        loose, snapshot = save_history.snapshot(read)
+        before = self.db.save_state(state.config.id, game, last["saved"]) if last and last["game"] == game else None
+        self.db.add_save(state.config.id, game, found[1], loose, snapshot)
+        if before:
+            self.save_checks(state, game, last["saved"], found[1], before, snapshot)
+
+    def save_checks(self, state: ServerState, game: int, was: int, saved: int, before: dict, after: dict):
+        """The exploit checks over two autosaves in a row. Each finding goes to the staff channel and the
+        live feed once a game; none of them kicks or bans."""
+        settings = self.staff_alert_settings()
+        if state.save_game != game:
+            state.save_game, state.save_alerted, state.home_wrecks = game, set(), []
+        kills = Counter(k for at, k, kind, _ in state.kill_log if was - 30 <= at <= saved + 30)
+        roadkills = Counter(k for at, k, kind, damage in state.kill_log
+                            if kind == "teamkill" and damage == "COLLISION" and at >= game)
+        online = {p["identity"]: p["name"] for p in state.players if p.get("identity")}
+
+        def name(identity):
+            known = None if identity in online else self.db.player(identity)
+            return online.get(identity) or (known["name"] if known else identity[:8])
+        found = save_checks.run(before, after, saved - was, settings, name, kills,
+                                self.db.game_vehicles(state.config.id, game) if settings["vehicle_on"] else {},
+                                roadkills, state.home_wrecks)
+        for title, once, text in found:
+            if once in state.save_alerted:
+                continue
+            state.save_alerted.add(once)
+            self.db.add_staff_alert(state.config.id, saved, f"{title} on {state.config.name}", text)
+            self.db.add_feed(state.config.id, "sus", text.replace("**", ""))
 
     @staticmethod
     def spawn_kit(person, character_prefab, names):
@@ -421,11 +506,18 @@ class ServerManager:
             player = next((p for p in state.players if p.get("identity") == identity), None)
             known = self.db.player_names(identity)
             name = (player or {}).get("name") or (known[0]["name"] if known else identity)
-            over = " and ".join(o for o in (f"{scopes} scopes" if scopes > scope_limit else "",
-                                            f"{morphine} morphine" if morphine > morphine_limit else "") if o)
-            on_them = holding >= kit
-            what = f"is carrying {over}" if on_them else f"spawned with a loadout of {over}"
-            why = f"carrying {over}" if on_them else f"spawning with a loadout of {over}"
+            # Each count over its limit is named with where it came from, carried or the spawn loadout.
+            carried_over, kit_over = [], []
+            for label, carried, spawned, limit in (("scopes", holding[0], kit[0], scope_limit),
+                                                   ("morphine", holding[1], kit[1], morphine_limit)):
+                if max(carried, spawned) > limit:
+                    (carried_over if carried >= spawned else kit_over).append(f"{max(carried, spawned)} {label}")
+            what = " and ".join(p for p in (f"is carrying {' and '.join(carried_over)}" if carried_over else "",
+                                            f"spawned with a loadout of {' and '.join(kit_over)}" if kit_over else "")
+                                if p)
+            why = " and ".join(p for p in (f"carrying {' and '.join(carried_over)}" if carried_over else "",
+                                           f"spawning with a loadout of {' and '.join(kit_over)}" if kit_over else "")
+                               if p)
             flag = state.loadout_flags.setdefault(identity, {"alerted": False, "kicked": 0, "banned": False})
             if not flag["alerted"]:
                 flag["alerted"] = True
@@ -437,6 +529,9 @@ class ServerManager:
                     self.db.add_staff_alert(state.config.id, now(), f"Stacked loadout on {state.config.name}", text)
                 self.db.add_feed(state.config.id, "sus", text.replace("**", ""))
             if fia or flag["banned"] or identity in self.staff_ids() or self.db.active_ban(identity):
+                continue
+            # With RCON down the player list is empty, so everyone would look like they'd left and be banned.
+            if not state.online:
                 continue
             kick_on, ban_on, here = settings["loadout_kick"], settings["loadout_ban"], player is not None
             if ban_on and (not kick_on or not here or (flag["kicked"] and saved - flag["kicked"] >= STACK_RETRY)):
@@ -484,6 +579,7 @@ class ServerManager:
         self.db.prune_memory()
         self.db.prune_events()
         self.db.prune_staff_alerts()
+        self.db.prune_save_history()
         for row in self.db.old_archives(now() - ARCHIVE_DAYS * 86400):
             try:
                 Path(row["path"]).unlink(missing_ok=True)
@@ -530,7 +626,15 @@ class ServerManager:
         Returns who's reached an automatic kick or ban."""
         settings = self.staff_alert_settings()
         state.detector.s.update(self.sus_settings(), mine_kills=settings["mines"])
+        state.kill_log = [k for k in state.kill_log if now() - k[0] < KILL_LOG_SECONDS]
+        state.kill_log += [(e["at"], e["killer"], e["kind"], e.get("damage") or "") for e in events
+                           if e.get("kind") in ("kill", "teamkill") and e.get("killer")]
+        state.sides.update({e["identity"]: e["faction"] for e in events if e.get("kind") == "side" and e.get("identity")})
+        before = state.detector.game
         flags = [f for event in events for f in state.detector.feed(event)]
+        if state.detector.game != before:
+            # The tallies start again each game, so last game's running lines mustn't swallow this game's first flag.
+            state.running.clear()
         actions = []
         for flag in flags + state.detector.flush(now()):
             self.suspicious(state, flag)
@@ -539,8 +643,16 @@ class ServerManager:
             if flag.get("first") and settings["mines_on"]:
                 self.db.add_staff_alert(state.config.id, flag["at"], f"AP mine spam on {state.config.name}",
                                         flag["text"].replace(flag["name"], f"**{flag['name']}**", 1))
-            if flag["identity"] and now() - flag["at"] < AUTO_FRESH:
-                actions.append(("mines", flag["identity"], flag["name"], flag["count"], settings))
+        # The alert counts every mine kill, so staff see who's laying loads of them. The automatic kick
+        # and ban count only teammates killed, since mining the enemy is fair play.
+        for event in events:
+            key = state.detector.mine_owner(event)
+            if (event.get("relation") != "TK" or key is None or key.startswith("name:")
+                    or now() - event["at"] >= AUTO_FRESH):
+                continue
+            tally = state.detector.mines.get(key)
+            if tally:
+                actions.append(("mines", key, event.get("killer_label") or key, tally["tk"], settings))
         return actions
 
     def sus_settings(self) -> dict:
@@ -580,8 +692,13 @@ class ServerManager:
                         f"{victims}.")
                 self.db.add_staff_alert(state.config.id, burst["at"], f"Mass teamkill on {state.config.name}", text)
             killer = event.get("killer")
+            # A mortar or grenade landing on teammates can be an accident, so only gunfire teamkills
+            # count towards the automatic kick and ban; the alert still counts them all.
+            if event.get("damage") != "KINETIC":
+                continue
+            state.tk_gunfire.feed(event, 0, settings["seconds"], now())
             if acting and event["kind"] == "teamkill" and killer and now() - event["at"] < AUTO_FRESH:
-                actions.append(("tk", killer, event.get("killer_name") or killer, state.tk_burst.in_window(killer),
+                actions.append(("tk", killer, event.get("killer_name") or killer, state.tk_gunfire.in_window(killer),
                                 settings))
         return actions
 
@@ -617,7 +734,7 @@ class ServerManager:
             return
         state.punished[(kind, identity)] = (action, now())
         what = (f"teamkilling {count} players in {settings['seconds']} seconds" if kind == "tk"
-                else f"killing {count} players with AP mines this game")
+                else f"killing {count} teammates with AP mines this game")
         if action == "ban":
             seconds = settings[f"{kind}_ban_length"]
             reason = "Mass teamkilling (automatic ban)" if kind == "tk" else "AP mine spam (automatic ban)"
@@ -753,6 +870,10 @@ class ServerManager:
         self.alerts.send(f"{state.config.name} crashed or restarted on its own",
                          f"The server program ended without anyone pressing a button. {detail}".strip(),
                          alert_colours.RED)
+        tail = last_log_lines(state.config.log_dir) if state.config.log_dir else ""
+        text = f"The server program ended without anyone pressing a button. {detail}".strip()
+        self.db.add_staff_alert(state.config.id, at or now(), f"Server crash on {state.config.name}",
+                                text + (f"\nThe last lines of its log:\n```\n{tail}\n```" if tail else ""))
 
     async def start_mission_check(self, server_id: str, username: str):
         state = self.states[server_id]
@@ -839,6 +960,8 @@ class ServerManager:
             raise RconError(state.error or "server is offline")
         try:
             return await state.client.command(text)
+        except RconReply:
+            raise
         except RconError as exc:
             self._offline(state, exc)
             raise
@@ -893,7 +1016,10 @@ class ServerManager:
     async def enforce_ip_bans(self, state: ServerState):
         """Kick banned accounts that are still connected, and ban any other
         account that joins from an IP-banned address."""
+        evasion = self.staff_alert_settings()["evasion_on"] if state.players else False
         for player in state.players:
+            if evasion and player["identity"]:
+                self.ban_evasion(state, player["identity"], player["name"])
             identity = player["identity"]
             if not identity or now() - self._ip_kicked.get(identity, 0) < 30:
                 continue
@@ -909,6 +1035,21 @@ class ServerManager:
                             f"still connected while banned ({own['reason']})")
                 continue
             await self.ban_for_banned_ip(state, identity, player["name"])
+
+    def ban_evasion(self, state: ServerState, identity: str, name: str):
+        """A staff alert, at most once a day per account, when someone joins with the Steam ID or BattlEye GUID
+        of an account that's banned. Alert only: it doesn't ban them."""
+        if now() - state.evasion_alerted.get(identity, 0) < 86400 or self.db.active_ban(identity):
+            return
+        hit = self.db.id_ban_hit(identity)
+        if hit is None:
+            return
+        state.evasion_alerted[identity] = now()
+        source = hit["name"] or hit["identity"]
+        text = (f"**{name}** joined with the same {hit['shared']} as **{source}**, who is banned"
+                f" ({hit['reason'] or 'no reason given'}).")
+        self.db.add_staff_alert(state.config.id, now(), f"Ban evasion on {state.config.name}", text)
+        self.db.add_feed(state.config.id, "sus", text.replace("**", ""))
 
     async def ban_for_banned_ip(self, state: ServerState, identity: str, name: str):
         """Ban an account that has connected from an IP-banned address, and kick it if it's on."""

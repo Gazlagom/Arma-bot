@@ -2,6 +2,7 @@
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import sqlite3
 from zoneinfo import ZoneInfo
 from bot.ranks.rank_rules import XP_PER_KILL, XP_PER_MATCH, XP_PER_TEAMKILL
 from bot.storage.rank_persistence import backup_before
@@ -321,8 +322,19 @@ def window_factions(db, guild, start, end, server):
     return dict(rows)
 
 
+# What a board counts. A kill credited from further than this is the log blaming the wrong player.
+MAX_DISTANCE = 2000
+BOARD = f"{SCORED} AND COALESCE(e.damage_type,'')<>'COLLISION' AND COALESCE(e.distance,0)<={MAX_DISTANCE}"
+
+
 def window_standings(db, guild, start, end=None, server=None, ground=None):
-    """One row per linked player, best kills first. Heli kills are left out (they have their own board).
+    """One row per linked player, (Discord id, enemy kills, deaths, name), best first. Teamkills aren't
+    taken off. Heli kills are left out (they have their own board).
+
+    A kill counts only from under 2 km, not by running someone over, never on one of the killer's own
+    accounts. Without `server` (the weekly
+    board) only kills inside a recorded match, or in the match running now, count, so kills in the
+    gaps between matches don't.
 
     `server` narrows it to one server's events, which a single match's board
     needs: OYB runs several servers at once, so a time window on its own also
@@ -331,23 +343,34 @@ def window_standings(db, guild, start, end=None, server=None, ground=None):
     including the players who finished without a kill or a death.
     """
     low, high = window(start, end)
-    scope = "" if server is None else " AND server=?"
-    where = (low, high) if server is None else (low, high, server)
+    if server is None:
+        # Kills after a server's last recorded match are the match being played now, so the board
+        # stays live; a server with no matches recorded at all keeps every kill rather than none.
+        source = ("combat_events e LEFT JOIN combat_matches m ON m.server=e.server"
+                  " AND e.occurred>=m.started AND e.occurred<=m.ended")
+        match, where = "COALESCE(m.started, 'live')", (low, high)
+        scope = (" AND (m.started IS NOT NULL OR e.occurred>COALESCE("
+                 "(SELECT MAX(ended) FROM combat_matches WHERE server=e.server), ''))")
+    else:
+        source, match, scope, where = "combat_events e", "''", " AND e.server=?", (low, high, server)
     present = f"""
         UNION ALL
-        SELECT identity, 0, 0 FROM combat_presence
-        WHERE occurred>=? AND occurred<?{scope}
+        SELECT identity, 0, 0, 0 FROM combat_presence
+        WHERE occurred>=? AND occurred<? AND server=?
     """ if server is not None else ""
     rows = db.execute(f'''
         WITH scored AS (
-            SELECT victim, killer, relation FROM combat_events
-            WHERE occurred>=? AND occurred<?{scope} AND {SCORED}
+            SELECT e.victim, e.killer, e.relation, {match} AS game, e.occurred FROM {source}
+            WHERE e.occurred>=? AND e.occurred<?{scope} AND {BOARD}
+              AND NOT EXISTS (SELECT 1 FROM account_links k JOIN account_links v
+                              ON v.guild=k.guild AND v.discord_id=k.discord_id
+                              WHERE k.guild=? AND k.identity=e.killer AND v.identity=e.victim)
         ), tallied AS (
-            SELECT identity, SUM(kills) AS kills, SUM(deaths) AS deaths FROM (
+            SELECT identity, SUM(kills) AS kills, SUM(teamkills) AS teamkills, SUM(deaths) AS deaths FROM (
                 SELECT killer AS identity, CASE WHEN relation='ENEMY' THEN 1 ELSE 0 END AS kills,
-                       0 AS deaths FROM scored
+                       CASE WHEN relation='TK' THEN 1 ELSE 0 END AS teamkills, 0 AS deaths FROM scored
                 UNION ALL
-                SELECT victim AS identity, 0, 1 FROM scored
+                SELECT victim AS identity, 0, 0, 1 FROM scored
                 {present}
             ) GROUP BY identity
         )
@@ -356,8 +379,64 @@ def window_standings(db, guild, start, end=None, server=None, ground=None):
         WHERE a.guild=?
         GROUP BY a.discord_id
         ORDER BY SUM(t.kills) DESC, SUM(t.deaths) ASC, a.discord_id ASC''',
-        (*where, *(where if server is not None else ()), guild)).fetchall()
+        (*where, guild, *(where if server is not None else ()), guild)).fetchall()
     return without_heli_kills(db, guild, rows, start, end, server, ground)
+
+
+def games_played(db, identities):
+    """How many recorded matches these accounts took the field in."""
+    who = held(identities)
+    if not who:
+        return 0
+    marks = ",".join("?" * len(who))
+    try:
+        return db.execute(f'''SELECT COUNT(*) FROM combat_matches m WHERE EXISTS (
+            SELECT 1 FROM combat_presence p WHERE p.server=m.server AND p.occurred>=m.started
+              AND p.occurred<=m.ended AND p.identity IN ({marks}))''', who).fetchone()[0]
+    except sqlite3.OperationalError:
+        return 0  # combat tracking was never set up on this database
+
+
+def played_faction(db, identities):
+    """The side these accounts have taken the field on most, or None if they haven't played."""
+    who = held(identities)
+    if not who:
+        return None
+    marks = ",".join("?" * len(who))
+    try:
+        row = db.execute(f'''SELECT faction FROM combat_presence WHERE identity IN ({marks})
+            AND faction IN ('US','USSR','FIA') GROUP BY faction ORDER BY COUNT(*) DESC, MAX(occurred) DESC LIMIT 1''',
+            who).fetchone()
+    except sqlite3.OperationalError:
+        return None  # combat tracking was never set up on this database
+    return row[0] if row else None
+
+
+def window_present(db, start, end, server):
+    """Every game account seen on this server in the window: on the field, killing or being killed."""
+    low, high = window(start, end)
+    return {row[0] for row in db.execute(
+        f'''SELECT identity FROM combat_presence WHERE server=? AND occurred>=? AND occurred<?
+            UNION SELECT killer FROM combat_events e WHERE server=? AND occurred>=? AND occurred<? AND {SCORED}
+            UNION SELECT victim FROM combat_events e WHERE server=? AND occurred>=? AND occurred<? AND {SCORED}''',
+        (server, low, high) * 3) if row[0]}
+
+
+def window_sides(db, guild, start, end=None, server=None):
+    """{Discord id: side tag} for the side each linked member played in the window: the one they were
+    last on, with a * when they played the other side too."""
+    low, high = window(start, end)
+    scope, args = ("", ()) if server is None else (" AND p.server=?", (server,))
+    picked = {}
+    for member, faction in db.execute(f'''SELECT a.discord_id, p.faction FROM combat_presence p
+            JOIN account_links a ON a.identity=p.identity
+            WHERE p.occurred>=? AND p.occurred<?{scope} AND p.faction IS NOT NULL AND a.guild=?
+            ORDER BY p.occurred''', (low, high, *args, guild)):
+        sides = picked.setdefault(member, [])
+        if faction in sides:
+            sides.remove(faction)
+        sides.append(faction)
+    return {member: (sides[-1], len(sides) > 1) for member, sides in picked.items()}
 
 
 def without_heli_kills(db, guild, rows, start, end, server, ground):
@@ -367,8 +446,9 @@ def without_heli_kills(db, guild, rows, start, end, server, ground):
     ground = ground or heights.load()
     if ground is None or not rows:
         return rows
+    from bot.storage.panel_saves import heli_check
     spots = [s for s in killer_spots(db, start, end) if server is None or s[0] == server]
-    counted = heli_kills(spots, ground)
+    counted = heli_kills(spots, ground, heli_check(spots))
     if not counted:
         return rows
     owner = dict(db.execute('SELECT identity, discord_id FROM account_links WHERE guild=?', (guild,)).fetchall())

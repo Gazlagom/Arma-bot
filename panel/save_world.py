@@ -170,6 +170,8 @@ def records(data):
         at += 4
         for _ in range(total):
             length = struct.unpack_from("<I", data, at)[0]
+            if at + 4 + length > len(data):
+                raise struct.error("the save ends part way through a record")
             yield name, data[at + 4:at + 4 + length]
             at += 4 + length
 
@@ -201,47 +203,71 @@ def read(path):
                 continue
             rid, value, parts = split(record)
             if section == "Player":
-                p = {"identity": rid}
-                for part in parts:
-                    if Bits(value, part[0], part[1]).take(1) == 0 and "body" not in p:
-                        links = exactly(player_links, value, *part)
-                        if links:
-                            p.update(links)
-                            continue
-                    for comp in components(value, part):
-                        for reader in (xp, faction):
-                            got = exactly(reader, value, *comp)
-                            if got:
-                                p.update(got)
-                                break
-                players.append(p)
+                players.append(player_record(rid, value, parts))
             else:
-                body = {}
-                for part in parts:
-                    first = Bits(value, part[0], part[1]).take(1)
-                    if first == 0 and "pos" not in body:
-                        e = entity(value, *part)
-                        if e:
-                            body.update(e)
-                            continue
-                    for comp in components(value, part):
-                        got = exactly(hit_zones, value, *comp) or exactly(faction, value, *comp)
-                        if got:
-                            body.update(got)
+                body = character_record(value, parts)
                 if body.get("pos"):
                     bodies[rid] = body
     except (struct.error, IndexError, Bad, ValueError):
         return None
+    return [{k: v for k, v in p.items() if k not in ("y", "vehicle", "seat", "body")} for p in joined(players, bodies)]
+
+
+def player_record(rid, value, parts):
+    p = {"identity": rid}
+    for part in parts:
+        if Bits(value, part[0], part[1]).take(1) == 0 and "body" not in p:
+            links = exactly(player_links, value, *part)
+            if links:
+                p.update(links)
+                continue
+        for comp in components(value, part):
+            for reader in (xp, faction):
+                got = exactly(reader, value, *comp)
+                if got:
+                    p.update(got)
+                    break
+    return p
+
+
+def seat(r):
+    r.int()
+    vehicle, slot = r.uuid(), r.text()
+    if not slot or not slot.isprintable():
+        raise Bad()
+    return {"vehicle": vehicle, "seat": slot}
+
+
+def character_record(value, parts):
+    body = {}
+    for part in parts:
+        first = Bits(value, part[0], part[1]).take(1)
+        if first == 0 and "pos" not in body:
+            e = entity(value, *part)
+            if e:
+                body.update(e)
+                continue
+        for comp in components(value, part):
+            got = exactly(hit_zones, value, *comp) or exactly(faction, value, *comp) or exactly(seat, value, *comp)
+            if got:
+                body.update(got)
+    return body
+
+
+def joined(players, bodies):
+    """Each player with the character they're playing (or their last body): where, alive, and any seat."""
     out = []
     for p in players:
-        body = bodies.get(p.get("current")) or bodies.get(p.get("body"))
+        body_id = p.get("current") if p.get("current") in bodies else p.get("body")
+        body = bodies.get(body_id)
         if not body:
             continue
         x, y, z = body["pos"]
         zones = body.get("zones") or {}
         out.append({"identity": p["identity"], "faction": p.get("faction") or body.get("faction") or "",
-                    "xp": p.get("xp"), "x": round(x, 1), "z": round(z, 1),
-                    "dead": zones.get("Health", 1) <= 0, "kind": prefab_name(body.get("prefab", "")).rsplit("/", 1)[-1][:-3]})
+                    "xp": p.get("xp"), "x": round(x, 1), "y": round(y, 1), "z": round(z, 1),
+                    "dead": zones.get("Health", 1) <= 0, "kind": prefab_name(body.get("prefab", "")).rsplit("/", 1)[-1][:-3],
+                    "vehicle": body.get("vehicle"), "seat": body.get("seat"), "body": body_id})
     return out
 
 
@@ -304,6 +330,9 @@ def players(path):
     return cached(path, read, _cache)
 
 
+CACHED_SAVES = 4
+
+
 def cached(path, reader, cache):
     try:
         stamp = Path(path).stat().st_mtime_ns
@@ -313,6 +342,10 @@ def cached(path, reader, cache):
     if hit and hit[0] == stamp:
         return hit[1]
     got = reader(path)
-    cache.clear()
+    # Each autosave is a new path, so only the newest few are kept; one per server, so a
+    # map with two servers on it doesn't read both saves again on every request.
+    cache.pop(str(path), None)
+    while len(cache) >= CACHED_SAVES:
+        cache.pop(next(iter(cache)))
     cache[str(path)] = (stamp, got)
     return got

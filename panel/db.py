@@ -7,12 +7,13 @@ from pathlib import Path
 from panel.feedsides import feed_parts, sides_from
 
 FEED_SHOWS = {"joins": ("join", "leave", "side"), "kills": ("kill", "teamkill"), "tks": ("teamkill",), "sus": ("sus",),
-              "rcon": ("rcon", "server"), "admin": ()}
+              "votes": ("vote",), "rcon": ("rcon", "server"), "admin": ()}
 # The rows that name a player, so the ones that get a side chip beside the name.
 MARKED_KINDS = ("join", "leave", "side", "kill", "teamkill")
 
 # Columns added after their table first shipped: older databases get them on start.
-ADDED_COLUMNS = (("server_samples", "sock_drops", "REAL"), ("notes", "edited_by", "TEXT"), ("notes", "edited_at", "INTEGER"), ("warnings", "used_ban", "INTEGER"), ("warnings", "edited_by", "TEXT"), ("warnings", "edited_at", "INTEGER"), ("users", "toured", "INTEGER NOT NULL DEFAULT 0"), ("users", "manage_toured", "INTEGER NOT NULL DEFAULT 0"),
+ADDED_COLUMNS = (("server_samples", "sock_drops", "REAL"), ("bans", "reviewed_by", "TEXT"), ("bans", "reviewed_at", "INTEGER"),
+                 *(("server_samples", c, "INTEGER") for c in ("side_us", "side_ussr", "side_fia")), ("notes", "edited_by", "TEXT"), ("notes", "edited_at", "INTEGER"), ("warnings", "used_ban", "INTEGER"), ("warnings", "edited_by", "TEXT"), ("warnings", "edited_at", "INTEGER"), ("users", "toured", "INTEGER NOT NULL DEFAULT 0"), ("users", "manage_toured", "INTEGER NOT NULL DEFAULT 0"),
                  *(("kills", c, "REAL") for c in ("victim_x", "victim_y", "killer_x", "killer_y")),
                  *(("box_samples", c, "REAL") for c in ("disk_pct", "disk_read", "disk_write", "temp", "conntrack",
                                                         "tcp_retrans", "softnet_drop", "nic_errors")))
@@ -379,6 +380,22 @@ CREATE TABLE IF NOT EXISTS vehicle_plans (
     at INTEGER NOT NULL,
     PRIMARY KEY (server, prefab)
 );
+CREATE TABLE IF NOT EXISTS save_points (
+    server TEXT NOT NULL,
+    game INTEGER NOT NULL,
+    saved INTEGER NOT NULL,
+    loose_supplies INTEGER NOT NULL,
+    PRIMARY KEY (server, saved)
+);
+CREATE TABLE IF NOT EXISTS save_rows (
+    server TEXT NOT NULL,
+    game INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    saved INTEGER NOT NULL,
+    data TEXT,
+    PRIMARY KEY (server, game, kind, key, saved)
+);
 """
 
 
@@ -515,6 +532,18 @@ class PanelDB:
             return self.all(sql + " ORDER BY id DESC", now())
         return self.all(sql + " ORDER BY id DESC")
 
+    # Who the panel bans as by itself: the automatic kicks and bans, and IP-ban matches.
+    AUTO_BANNERS = ("Automatic", "panel")
+
+    def auto_bans_to_review(self):
+        """Active bans the panel made by itself that no one has checked yet, newest first."""
+        marks = ", ".join("?" * len(self.AUTO_BANNERS))
+        return self.all(f"SELECT * FROM bans WHERE created_by IN ({marks}) AND reviewed_at IS NULL AND removed_at IS NULL"
+                        " AND (expires_at IS NULL OR expires_at > ?) ORDER BY id DESC", *self.AUTO_BANNERS, now())
+
+    def review_ban(self, ban_id, username):
+        self.write("UPDATE bans SET reviewed_by = ?, reviewed_at = ? WHERE id = ?", username, now(), ban_id)
+
     def active_ban(self, identity: str):
         return self.one("SELECT * FROM bans WHERE identity = ? AND removed_at IS NULL"
                         " AND (expires_at IS NULL OR expires_at > ?) ORDER BY id DESC", identity, now())
@@ -612,6 +641,19 @@ class PanelDB:
         return {r["ip"] for r in self.all(
             "SELECT i.ip FROM ip_bans i JOIN bans b ON b.id = i.ban_id WHERE b.removed_at IS NULL"
             " AND (b.expires_at IS NULL OR b.expires_at > ?)", now())}
+
+    def id_ban_hit(self, identity: str):
+        """An active ban on another account that shares this one's Steam ID or BattlEye GUID, with which it shares."""
+        t = now()
+        for shared, table, column in (("Steam ID", "platforms", "steam_id"), ("BattlEye GUID", "connections", "guid")):
+            row = self.one(
+                f"SELECT b.*, '{shared}' AS shared FROM {table} mine JOIN {table} other ON other.{column} = mine.{column}"
+                f" AND other.identity != mine.identity JOIN bans b ON b.identity = other.identity"
+                f" WHERE mine.identity = ? AND mine.{column} != '' AND b.removed_at IS NULL"
+                f" AND (b.expires_at IS NULL OR b.expires_at > ?) ORDER BY b.id DESC LIMIT 1", identity, t)
+            if row:
+                return row
+        return None
 
     def ip_ban_hit(self, identity: str, within=12 * 3600):
         """Another player's active IP ban on an address this identity connected from recently."""
@@ -775,7 +817,7 @@ class PanelDB:
                 "rx_drop", "udp_errors", "udp_rcvbuf", "udp_sndbuf", "disk_pct", "disk_read", "disk_write", "temp",
                 "conntrack", "tcp_retrans", "softnet_drop", "nic_errors")
     SERVER_KEYS = ("players", "proc_cpu", "rss", "threads", "fps", "query_ok", "query_ms", "disconnects",
-                   "errors", "reasons", "sock_drops")
+                   "errors", "reasons", "sock_drops", "side_us", "side_ussr", "side_fia")
 
     def add_box_sample(self, row, at=None, keep_days=7):
         t = int(at or now())
@@ -1099,6 +1141,57 @@ class PanelDB:
             [(r["identity"], r["kit"], r["title"], r["side"], r["loadout"], saved) for r in rows if r["identity"] in online])
         self.db.execute("INSERT OR REPLACE INTO loadout_saves VALUES (?, ?)", (server, saved))
         self.db.commit()
+
+    def last_save_point(self, server):
+        """The newest autosave kept for this server, or None."""
+        return self.one("SELECT * FROM save_points WHERE server = ? ORDER BY saved DESC LIMIT 1", server)
+
+    def save_state(self, server, game, at=None):
+        """{kind: {key: data}} as the game stood at the save made at `at` (the newest by default). Only what
+        changed is kept per save, so each thing's row is its newest at or before then; a thing that's gone
+        has a row with no data."""
+        rows = self.all(
+            "SELECT kind, key, data FROM save_rows r WHERE server = ? AND game = ? AND saved = (SELECT MAX(saved)"
+            " FROM save_rows WHERE server = r.server AND game = r.game AND kind = r.kind AND key = r.key AND saved <= ?)",
+            server, game, now() if at is None else at)
+        out = {}
+        for r in rows:
+            if r["data"] is not None:
+                out.setdefault(r["kind"], {})[r["key"]] = json.loads(r["data"])
+        return out
+
+    def add_save(self, server, game, saved, loose_supplies, snapshot):
+        """Keep one autosave: `snapshot` is {kind: {key: data}}. Only what changed since the game's last save
+        is written, and whatever is no longer in the save gets a row with no data."""
+        before = {kind: {key: json.dumps(data, sort_keys=True) for key, data in items.items()}
+                  for kind, items in self.save_state(server, game, saved).items()}
+        rows = []
+        for kind in set(snapshot) | set(before):
+            old, new = before.get(kind, {}), snapshot.get(kind, {})
+            for key, data in new.items():
+                text = json.dumps(data, sort_keys=True)
+                if old.get(key) != text:
+                    rows.append((server, game, kind, key, saved, text))
+            rows += [(server, game, kind, key, saved, None) for key in old.keys() - new.keys()]
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO save_points VALUES (?, ?, ?, ?)", (server, game, saved, loose_supplies))
+            self.db.executemany("INSERT OR REPLACE INTO save_rows VALUES (?, ?, ?, ?, ?, ?)", rows)
+        return len(rows)
+
+    def game_vehicles(self, server, game):
+        """{player: {vehicle id}} for every vehicle a player took out this game, from the kept autosaves."""
+        out = {}
+        for r in self.all("SELECT DISTINCT key, data FROM save_rows WHERE server = ? AND game = ? AND kind = 'build'"
+                          " AND data LIKE '%\"kind\": \"vehicle\"%'", server, game):
+            author = json.loads(r["data"]).get("author")
+            if author:
+                out.setdefault(author, set()).add(r["key"])
+        return out
+
+    def prune_save_history(self, days=30):
+        with self.db:
+            self.db.execute("DELETE FROM save_rows WHERE game < ?", (now() - days * 86400,))
+            self.db.execute("DELETE FROM save_points WHERE game < ?", (now() - days * 86400,))
 
     def loadouts(self, identity):
         """Every saved loadout a player has been on with, most used first, then newest."""

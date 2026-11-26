@@ -821,8 +821,9 @@ class AutoPunishTests(unittest.IsolatedAsyncioTestCase):
     def settings(self, **extra):
         self.db.publish_discord_doc("staffalerts", json.dumps({"on": True, "count": 3, "seconds": 60, **extra}), "gaz")
 
-    async def teamkill(self, n):
-        event = {"kind": "teamkill", "at": now(), "killer": BUFORD, "killer_name": "Buford", "victim_name": f"V{n}"}
+    async def teamkill(self, n, damage="KINETIC"):
+        event = {"kind": "teamkill", "at": now(), "killer": BUFORD, "killer_name": "Buford", "victim_name": f"V{n}",
+                 "damage": damage}
         for action in self.manager.mass_teamkills(self.state, [event]):
             await self.manager.auto_punish(self.state, *action)
 
@@ -933,7 +934,35 @@ class AutoPunishTests(unittest.IsolatedAsyncioTestCase):
             await self.manager.auto_punish(self.state, *action)
         ban = self.db.active_ban(BUFORD)
         self.assertEqual((ban["reason"], ban["expires_at"]), ("AP mine spam (automatic ban)", None))
-        self.assertIn("banned permanently for killing 4 players with AP mines", self.db.staff_alerts()[0]["text"])
+        self.assertIn("banned permanently for killing 4 teammates with AP mines", self.db.staff_alerts()[0]["text"])
+
+    def mine_kill(self, n, relation):
+        return {"kind": "kill", "at": now() + n, "relation": relation, "killer": BUFORD, "killer_name": "Buford",
+                "killer_label": "Buford", "victim": person(n), "victim_name": f"V{n}", "damage": "EXPLOSIVE",
+                "zone": "LFoot", "distance": 300.0}
+
+    async def test_mines_on_enemies_are_alerted_but_never_punished(self):
+        self.settings(mines=3, mines_kick=2, mines_ban=4)
+        events = [self.mine_kill(n, "ENEMY") for n in range(6)]
+        for action in self.manager.check(self.state, events):
+            await self.manager.auto_punish(self.state, *action)
+        self.assertEqual((self.kicked, self.db.active_ban(BUFORD)), ([], None))
+        self.assertEqual([a["title"] for a in self.db.staff_alerts()], ["AP mine spam on Server 1"])
+
+    async def test_mine_kick_counts_teammates_even_below_the_alert(self):
+        self.settings(mines=10, mines_kick=2)
+        events = [self.mine_kill(0, "ENEMY"), self.mine_kill(1, "TK"), self.mine_kill(2, "TK")]
+        for action in self.manager.check(self.state, events):
+            await self.manager.auto_punish(self.state, *action)
+        self.assertEqual(self.kicked, ["7"])
+        self.assertIn("was kicked for killing 2 teammates with AP mines", self.db.staff_alerts()[0]["text"])
+
+    async def test_explosive_teamkills_are_alerted_but_never_punished(self):
+        self.settings(tk_kick=2, tk_ban=3)
+        for n in range(4):
+            await self.teamkill(n, damage="EXPLOSIVE")
+        self.assertEqual((self.kicked, self.db.active_ban(BUFORD)), ([], None))
+        self.assertEqual([a["title"] for a in self.db.staff_alerts()], ["Mass teamkill on Server 1"])
 
 
 class IncidentTests(unittest.TestCase):
@@ -1931,7 +1960,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.db.write("UPDATE users SET toured = 1 WHERE username = 'boss'")      # took the first, shorter tour
         await self.login("boss", "boss-password")
         home = await (await self.client.get("/")).text()
-        self.assertIn('data-chapters="Dashboard,Server page,Players,Bans,Data,Settings"', home)
+        self.assertIn('data-chapters="Dashboard,Server page,Players,Bans,Data,Admin"', home)
         self.assertIn("You run the place", home)
         bans = await (await self.client.get("/bans?tour=1")).text()
         self.assertIn('data-next="/data?tour=1"', bans)
@@ -2042,9 +2071,10 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.db.add_connections("server-1", [{"identity": HAVOC, "ip": "99.102.29.3", "guid": "", "name": "Havoc", "at": now()}], {})
         await self.login("boss", "boss-password")
         home = await (await self.client.get("/")).text()
-        self.assertIn('href="/data"', home)
+        self.assertIn('<span>Admin</span>', home)
         self.assertNotIn('href="/ip-lookup"', home)
         data = await (await self.client.get("/data")).text()
+        self.assertIn('<a href="/data" class="on" aria-current="page">Data</a>', data)
         self.assertIn('href="/ip-lookup"', data)
         self.assertIn('href="/bot/data"', data)
         with unittest.mock.patch("panel.whois.lookup", new=unittest.mock.AsyncMock(return_value={**whois.read(ARIN), "reverse": "x.att.net"})):
@@ -2263,11 +2293,45 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
     async def test_discord_home_groups_every_page(self):
         await self.login("boss", "boss-password")
         home = await (await self.client.get("/discord")).text()
-        for key in ("welcome", "greeting", "serverinfo", "factions", "matchping", "weekly", "bans", "staffalerts",
+        for key in ("welcome", "greeting", "serverinfo", "factions", "matchping", "weekly", "bans",
                     "posts", "links", "channels", "names", "feedback"):
             self.assertIn(f'href="/discord/{key}"', home)
+        # Staff alerts moved to Players → Rules, beside the Sus checks.
+        self.assertNotIn('href="/discord/staffalerts"', home)
+        rules = await (await self.client.get("/discord/staffalerts")).text()
+        self.assertIn('<a href="/discord/staffalerts" class="on" aria-current="page">Rules</a>', rules)
+        self.assertIn('href="/sus-settings"', rules)
         self.assertIn("What new members see", home)
         self.assertIn("Bot&#39;s default", home)
+
+    async def test_automatic_bans_to_check_on_the_bans_page(self):
+        await self.login("boss", "boss-password")
+        ban = self.db.add_ban(HAVOC, "Sgt Havoc", "Teamkilling (automatic ban)", "Automatic")
+        token = await self.csrf("/bans")
+        page = await (await self.client.get("/bans")).text()
+        self.assertIn("Automatic bans to check", page)
+        self.assertIn(f'action="/bans/{ban}/keep"', page)
+        await self.client.post(f"/bans/{ban}/keep", data={"csrf": token})
+        self.assertNotIn("Automatic bans to check", await (await self.client.get("/bans")).text())
+        self.assertEqual(self.db.audit()[0]["action"], "kept automatic ban")
+
+    async def test_four_part_menu_and_alerts_page(self):
+        await self.login("boss", "boss-password")
+        self.db.add_staff_alert("server-1", now(), "Base griefing on Server 1", "**Rook** nearby.")
+        self.db.add_staff_alert("server-1", now(), "Mass teamkill on Server 1", "**Buford** teamkilled 3.")
+        home = await (await self.client.get("/")).text()
+        side = home.split('<nav class="side-nav">')[1].split("</nav>")[0]
+        self.assertEqual([label for label in ("Servers", "Players", "Discord", "Admin", "Bans", "Settings", "Support")
+                          if f"<span>{label}</span>" in side], ["Servers", "Players", "Discord", "Admin"])
+        page = await (await self.client.get("/alerts")).text()
+        self.assertIn('<a href="/alerts" class="on" aria-current="page">Alerts</a>', page)
+        self.assertIn("Rook nearby.", page)
+        self.assertIn("Buford teamkilled 3.", page)
+        exploits = await (await self.client.get("/alerts?show=exploits")).text()
+        self.assertIn("Rook nearby.", exploits)
+        self.assertNotIn("Buford teamkilled 3.", exploits)
+        server = await (await self.client.get("/server/server-1")).text()
+        self.assertIn('data-tab="game"', server)
 
     async def test_sus_settings_page(self):
         await self.login("boss", "boss-password")
@@ -2314,10 +2378,10 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(doc, {"on": True, "count": 4, "seconds": 90, "ping_role": "Admin", "mines_on": False,
                                "mines": 8, "mines_ping_role": "Ticket Manager", "tk_kick": 5, "tk_ban": 8,
                                "tk_ban_length": 0, "mines_kick": 0, "mines_ban": 10, "mines_ban_length": 604800,
-                               # Not sent by this form, so the stacked loadout part keeps its defaults.
+                               # Not sent by this form, so the stacked loadout and exploit parts keep their defaults.
                                "loadout_on": True, "loadout_scopes": 5, "loadout_morphine": 20,
                                "loadout_ping_role": "", "loadout_kick": False, "loadout_ban": False,
-                               "loadout_ban_length": 86400})
+                               "loadout_ban_length": 86400, **welcome_doc.EXPLOIT_DEFAULTS})
         page = await (await self.client.get("/discord/staffalerts")).text()
         self.assertIn("In use now", page)
         self.assertNotIn("hasn't reported in", page.split("In use now")[0].split("dc-status")[-1])
@@ -2325,6 +2389,8 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('name="tk_kick_on" checked', page)
         self.assertIn('name="tk_ban_on" checked', page)
         self.assertNotIn('name="mines_kick_on" checked', page)
+        self.assertIn('name="xp_gain" type="number" min="100" max="100000" value="1000"', page)
+        self.assertIn('name="evasion_on" checked', page)
         self.assertIn('name="mines_ban_on" checked', page)
         self.assertIn('<option value="0" selected>Permanent</option>', page)
         await self.client.post("/discord/staffalerts", data={"csrf": token, "action": "publish",
@@ -2786,6 +2852,20 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(" ms<", html)
         page = await (await self.client.get("/server/server-1")).text()
         self.assertIn('data-tab-panel="health"', page)
+
+    async def test_the_server_page_shows_base_supplies_and_game_xp_from_the_autosave(self):
+        await self.login("boss", "boss-password")
+        self.assertIn("for this server to read its autosaves", await (await self.client.get("/server/server-1/save.part")).text())
+        self.db.add_save("server-1", 100, now(), 590, {
+            "base": {"b1": {"name": "Figari", "faction": "US", "x": 1.0, "z": 1.0, "supplies": 150}},
+            "player": {HAVOC: {"faction": "USSR", "xp": 900, "dead": False, "seat": "Commander"},
+                       BUFORD: {"faction": "US", "xp": 4000, "dead": True, "seat": None}}})
+        html = await (await self.client.get("/server/server-1/save.part")).text()
+        self.assertIn("<td>Figari</td><td>US</td><td class=\"num\">150</td>", html)
+        self.assertIn("Not at a base: 590 supplies", html)
+        self.assertLess(html.index(BUFORD), html.index(HAVOC))
+        self.assertIn("In a vehicle (Commander)", html)
+        self.assertIn("This game, from the autosave", await (await self.client.get("/server/server-1")).text())
 
     async def test_the_public_site_has_a_server_network_and_a_page_per_server(self):
         self.config.site_hosts = ["oybgaming.com"]

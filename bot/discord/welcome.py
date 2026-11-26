@@ -44,9 +44,13 @@ def read_doc(path, key):
     if not row or not row[0]:
         return None
     try:
-        return json.loads(row[0]), row[1]
+        doc = json.loads(row[0])
     except ValueError:
         return None
+    if key == "welcome" and isinstance(doc, dict) and isinstance(doc.get("buttons"), list):
+        # There's no "No faction" choice any more, even on a message published before.
+        doc["buttons"] = [b for b in doc["buttons"] if not (isinstance(b, dict) and b.get("type") == "no_faction")]
+    return doc, row[1]
 
 
 def read_posts(path):
@@ -348,9 +352,8 @@ class Welcome:
             return
         settings = (self.docs.get("staffalerts") or (welcome_doc.default_staffalerts(), 0))[0]
         for alert_id, server, at, title, text in rows:
-            # AP mine and stacked loadout alerts can each ping a different role from mass teamkills.
-            wanted = settings.get("mines_ping_role" if title.startswith("AP mine spam")
-                                  else "loadout_ping_role" if title.startswith("Stacked loadout") else "ping_role", "")
+            # Each part of the Staff alerts page can ping its own role.
+            wanted = welcome_doc.alert_role(settings, title)
             role = by_name(guild, wanted) if wanted else None
             embed = discord.Embed(title=f"🚨 {title}", description=text, colour=0xD0574C)
             embed.set_footer(text="OYB Control · staff alert")

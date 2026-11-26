@@ -166,6 +166,7 @@ def render(request, template, **context):
         can=(lambda perm: bool(user) and allowed(request, perm)),
         can_on=(lambda perm, server: bool(user) and allowed_on(request, perm, server)),
         can_manage=bool(user) and manager_servers(request) != set(),
+        is_owner=bool(user) and named(request),
         servers=request.app[CONFIG].servers,
         nav_servers=[{"id": st.config.id, "name": st.config.name, "online": st.online, "map": st.query.get("map") or ""}
                      for st in request.app[MANAGER].states.values()],
@@ -555,7 +556,7 @@ async def server_page(request):
     recent = db.audit(server=state.config.id, limit=15)
     overview = server_overview(request, state)
     return render(request, "server.html", s=server_view(state), card=control_card(state, request.app[PICTURES], card_details(db)), recent=recent,
-                  health=health_data(db, state), alts=alt_flags(request, state),
+                  health=health_data(db, state), alts=alt_flags(request, state), save=save_view(state, db),
                   played=played(request, [p["identity"] for p in state.players]), amp=bool(request.app[AMP]),
                   gb=GB, csp=MAP_CSP, feed=overview["live_feed"], **overview, **history(request, state))
 
@@ -1085,11 +1086,14 @@ async def monitor_page(request):
                              peak=("rx_drop", "udp_errors", "udp_rcvbuf", "udp_sndbuf"))
     srv = monitor.downsample(server_rows, since, until,
                              ("players", "fps", "proc_cpu", "rss_gb", "query_ms", "query_down", "disconnects", "errors",
-                              "sock_drops"),
+                              "sock_drops", "side_us", "side_ussr", "side_fia"),
                              peak=("query_down", "disconnects", "errors", "query_ms", "sock_drops"))
     chart = lambda rows, series, floor=None: monitor.chart(rows, since, until, series, floor=floor)
     charts = [
         ("Players", chart(srv, [("players", "Players", "a")]), ""),
+        ("Players per side", chart(srv, [("side_us", "US", "a"), ("side_ussr", "USSR", "bad"), ("side_fia", "FIA", "c")]),
+         "" if any(r.get("side_us") is not None for r in server_rows) else
+         "Fills in from now on, from the side each player last joined in the log."),
         ("Server FPS", chart(srv, [("fps", "FPS", "a")], floor=60),
          "" if any(r["fps"] for r in server_rows) else "The server isn't logging its frame rate. Add -logStats 10000 "
          "to its start parameters and restart it; then this fills in every 10 seconds."),
@@ -1123,6 +1127,59 @@ async def monitor_page(request):
 async def summary_part(request):
     state = server_or_404(request, request.match_info["id"])
     return render(request, "_summary.html", s=server_view(state), health=health_data(request.app[DB], state))
+
+
+def save_view(state, db):
+    """The current game as its newest kept autosave has it: bases with their supplies, players by game XP.
+    None when no save of this game has been kept."""
+    point = db.last_save_point(state.config.id)
+    start = game_start(state)
+    # A save left from the game before this one doesn't count.
+    if not point or (start and point["saved"] < start - 60):
+        return None
+    got = db.save_state(state.config.id, point["game"], point["saved"])
+    online = {p["identity"]: p["name"] for p in state.players if p.get("identity")} if state.online else {}
+    players = []
+    for identity, p in got.get("player", {}).items():
+        known = None if identity in online else db.player(identity)
+        players.append({**p, "identity": identity, "online": identity in online,
+                        "name": online.get(identity) or (known["name"] if known else "")})
+    players.sort(key=lambda p: (-(p["xp"] or 0), p["name"].lower()))
+    bases = sorted(got.get("base", {}).values(), key=lambda b: (not b["name"], b["name"]))
+    return {"saved": point["saved"], "loose": point["loose_supplies"], "bases": bases, "players": players}
+
+
+async def save_part(request):
+    state = server_or_404(request, request.match_info["id"])
+    return render(request, "_save.html", s=server_view(state), save=save_view(state, request.app[DB]))
+
+
+# The kinds of staff alert the Alerts page can show on their own, by the start of their titles.
+ALERT_GROUPS = (("all", "All", ()), ("teamkills", "Teamkills", ("Mass teamkill",)),
+                ("mines", "Mines", ("AP mine spam", "Mines in own base")),
+                ("loadouts", "Loadouts", ("Stacked loadout",)),
+                ("exploits", "Exploits", ("XP farming", "Supply jump", "Supply transfer", "Base griefing",
+                                          "Vehicle griefing", "Teleport", "Under the map")),
+                ("evasion", "Ban evasion", ("Ban evasion", "Warned player banned")),
+                ("actions", "Kicks and bans", ("Auto-kicked", "Auto-banned")))
+ALERTS_SHOWN = 300
+
+
+async def alerts_page(request):
+    show = request.query.get("show", "all")
+    starts = dict((key, prefixes) for key, _, prefixes in ALERT_GROUPS).get(show)
+    if starts is None:
+        show, starts = "all", ()
+    names = {s.id: s.name for s in request.app[CONFIG].servers}
+    rows = []
+    for r in request.app[DB].staff_alerts(limit=ALERTS_SHOWN * 4 if starts else ALERTS_SHOWN):
+        if starts and not r["title"].startswith(starts):
+            continue
+        kind, _, where = r["title"].partition(" on ")
+        rows.append({"at": r["at"], "kind": kind, "text": r["text"],
+                     "server_name": names.get(r["server"]) or where})
+    return render(request, "alerts.html", alerts=rows[:ALERTS_SHOWN], show=show,
+                  groups=[(key, label) for key, label, _ in ALERT_GROUPS])
 
 
 async def feed_part(request):
@@ -1248,7 +1305,20 @@ async def bans_page(request):
     sync = request.app[BM]
     return render(request, "bans.html", bans=rows, show_old=show_old, durations=DURATIONS, ban_units=BAN_UNITS,
                   prefill=prefill, error="", bm=sync.status if sync else None, q=q, source=source,
-                  page=page, pages=pages, total=len(found), keep=keep, synced_on=bool(on_bm))
+                  page=page, pages=pages, total=len(found), keep=keep, synced_on=bool(on_bm),
+                  to_review=db.auto_bans_to_review())
+
+
+async def keep_ban(request):
+    """An automatic ban checked by staff and kept: it leaves the list to check."""
+    require(request, "ban")
+    db = request.app[DB]
+    ban = db.ban(int(request.match_info["ban_id"]))
+    if ban is not None and not ban["reviewed_at"]:
+        db.review_ban(ban["id"], request[USER]["username"])
+        audit(request, "kept automatic ban", target=ban["name"] or ban["identity"], detail=ban["reason"])
+        flash(request, f"Kept the ban on {ban['name'] or ban['identity']}.")
+    raise web.HTTPFound("/bans")
 
 
 async def add_ban(request):
@@ -2586,7 +2656,6 @@ DISCORD_GROUPS = (
         ("matchping", "\"Match started\" alerts, and who gets pinged for which server."),
         ("weekly", "The top 3 when the weekly leaderboard resets on Monday."),
         ("bans", "The DM a banned player gets, and the card in their ban ticket."),
-        ("staffalerts", "Alerts, kicks and bans for mass teamkills, AP mine spam and stacked loadouts."),
     )),
     ("Posting yourself", (
         ("posts", "Your own messages: announcements, events, FAQs, with buttons if you want."),
@@ -4943,6 +5012,7 @@ def create_app(config: PanelConfig, db: PanelDB | None = None, manager: ServerMa
     app.router.add_get("/server/{id}/feed.part", feed_part)
     app.router.add_get("/server/{id}/joiners.part", joiners_part)
     app.router.add_get("/server/{id}/summary.part", summary_part)
+    app.router.add_get("/server/{id}/save.part", save_part)
     app.router.add_get("/server/{id}/game/{folder}", game_page)
     app.router.add_get("/server/{id}/game/{folder}/log", game_log)
     app.router.add_post("/server/{id}/history/upload", upload_log)
@@ -4956,8 +5026,10 @@ def create_app(config: PanelConfig, db: PanelDB | None = None, manager: ServerMa
     app.router.add_get("/website/preview", website_preview)
     app.router.add_post("/server/{id}/kick", kick)
     app.router.add_get("/bans", bans_page)
+    app.router.add_get("/alerts", alerts_page)
     app.router.add_post("/bans", add_ban)
     app.router.add_post("/bans/{ban_id:\\d+}/remove", remove_ban)
+    app.router.add_post("/bans/{ban_id:\\d+}/keep", keep_ban)
     app.router.add_post("/bans/{ban_id:\\d+}/edit", edit_ban)
     app.router.add_get("/players", players_page)
     app.router.add_get("/players/unusual", unusual_page)

@@ -49,13 +49,37 @@ def current_faction(bot, guild, member):
     return None
 
 
+# What onboarding used to save for a member who chose to stay Renegade. There's no opting out now.
+STAYED_RENEGADE = 'NONE'
+# A member who hasn't picked a side is put on the one they play most once they've played this many games.
+GAMES_TO_MATCH = 10
+
+
+def ranked_faction(bot, guild, member_id, member=None):
+    """(side, matched) for the side a member's rank goes by: their faction role, or with none, once
+    they've played GAMES_TO_MATCH games, the side they've picked most in game (matched=True, and the bot
+    gives them that role). Before that they're Renegade."""
+    faction = current_faction(bot, guild, member) if member is not None else held_faction(bot, guild, member_id)
+    if faction:
+        return faction, False
+    from bot.storage.combat_store import games_played, played_faction
+    links = bot.account_links
+    held = links.identities(guild.id, member_id)
+    if games_played(links.db, held) < GAMES_TO_MATCH:
+        return None, False
+    side = played_faction(links.db, held)
+    return side, bool(side)
+
+
 def held_faction(bot, guild, member_id):
     """The member's faction when only their id is to hand. Their role is the
     truth; the saved pick covers a member the gateway cache has not loaded."""
     member = guild.get_member(member_id)
     if member is not None:
         return current_faction(bot, guild, member)
-    return bot.account_links.faction(guild.id, member_id)
+    saved = bot.account_links.faction(guild.id, member_id)
+    # Choosing to stay Renegade is saved as a pick too, but it isn't a side.
+    return None if saved == STAYED_RENEGADE else saved
 
 
 async def ensure_faction_roles(bot, guild):
